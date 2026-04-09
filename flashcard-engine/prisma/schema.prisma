@@ -1,0 +1,102 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum CardType {
+  CONCEPT
+  DEFINITION
+  CLOZE
+  EXAMPLE
+}
+
+enum CardState {
+  NEW
+  LEARNING
+  REVIEW
+  RELEARNING
+}
+
+enum ReviewRating {
+  AGAIN
+  HARD
+  GOOD
+  EASY
+}
+
+model Deck {
+  id           String    @id @default(cuid())
+  title        String
+  sourceFile   String
+  sourceHash   String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  lastReviewAt DateTime?
+  cards        Card[]
+  sessions     Session[]
+
+  @@index([createdAt])
+}
+
+model Card {
+  id          String       @id @default(cuid())
+  deckId      String
+  type        CardType
+  front       String
+  back        String
+  difficulty  Int          @default(2)
+  tags        String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  deck        Deck         @relation(fields: [deckId], references: [id], onDelete: Cascade)
+  schedule    CardSchedule?
+  reviews     Review[]
+
+  @@index([deckId, type])
+}
+
+model CardSchedule {
+  id            String    @id @default(cuid())
+  cardId         String    @unique
+  state          CardState @default(NEW)
+  dueAt          DateTime
+  intervalDays   Int       @default(0)
+  easeFactor     Float     @default(2.5)
+  repetition     Int       @default(0)
+  lapses         Int       @default(0)
+  lastReviewedAt DateTime?
+  card           Card      @relation(fields: [cardId], references: [id], onDelete: Cascade)
+
+  @@index([dueAt])
+}
+
+model Review {
+  id             String       @id @default(cuid())
+  cardId          String
+  rating          ReviewRating
+  responseTimeMs  Int?
+  qualityScore    Int?
+  answeredAt      DateTime     @default(now())
+  nextDueAt       DateTime?
+  resultingState  CardState?
+  card            Card         @relation(fields: [cardId], references: [id], onDelete: Cascade)
+
+  @@index([cardId, answeredAt])
+}
+
+model Session {
+  id          String   @id @default(cuid())
+  deckId       String
+  startedAt    DateTime @default(now())
+  endedAt      DateTime?
+  reviewed     Int      @default(0)
+  correct      Int      @default(0)
+  avgTimeMs    Int?
+  deck         Deck     @relation(fields: [deckId], references: [id], onDelete: Cascade)
+
+  @@index([deckId, startedAt])
+}
