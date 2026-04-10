@@ -22,6 +22,9 @@ Goal:
   - Prisma schema foundation
   - Typed environment validation
   - Basic API rate limiting
+- Milestone 2 in progress:
+  - Real PDF upload + extraction flow
+  - First-pass card generation and deck persistence
 
 ## Quick Start
 

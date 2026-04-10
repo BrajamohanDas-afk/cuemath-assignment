@@ -15,8 +15,10 @@ Project memory and operating rules for this repository.
 - Implemented:
   - Next.js app shell and core routes: `/`, `/upload`, `/decks`, `/review`, `/progress`
   - API endpoints: `/api/health`, `/api/config`
+  - API rate limiting on core API routes (10 requests per 60s per client, then `429 limit reached`)
   - Prisma schema foundation for decks/cards/reviews/schedule/sessions
   - Typed environment validation and env template
+  - Root-level repository README added at `C:\MyFile\Study material\cuemath-assignment\README.md`
   - Build/lint/prisma verification commands passing
 
 ## Stack Decisions
@@ -75,4 +77,3 @@ npm run prisma:push
   - Build real PDF upload
   - Parse/extract text
   - Generate first pass of flashcards through backend AI pipeline
-

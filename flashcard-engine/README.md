@@ -1,8 +1,8 @@
 # Flashcard Engine (Cuemath Build Challenge)
 
-Milestone 1 foundation for **Problem 1: The Flashcard Engine**.
+Milestone 2 implementation for **Problem 1: The Flashcard Engine**.
 
-## What is implemented in Milestone 1
+## What is implemented in Milestone 2
 
 - Next.js app shell with core routes:
   - `/`
@@ -12,13 +12,20 @@ Milestone 1 foundation for **Problem 1: The Flashcard Engine**.
   - `/progress`
 - API routes:
   - `GET /api/health`
-  - `GET /api/config` (safe, non-secret runtime config)
+  - `GET /api/config` (safe runtime config)
+  - `GET /api/decks` (deck summaries with due counts)
+  - `POST /api/decks` (PDF upload -> extraction -> flashcard generation -> save deck)
 - Database foundation with Prisma schema for:
   - decks
   - cards
   - card schedules (spaced repetition fields)
   - reviews
   - sessions
+- Milestone 2 ingestion flow:
+  - server-side PDF extraction with `pdf-parse`
+  - OpenAI-backed card generation when `OPENAI_API_KEY` is set
+  - automatic local fallback generation when key is missing or request fails
+  - deck and card persistence in SQLite via Prisma
 - Environment variable structure via `.env.example`.
 
 ## Local setup

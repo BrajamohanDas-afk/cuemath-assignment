@@ -5,7 +5,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Flashcard Engine",
-  description: "Milestone 1 foundation for Cuemath Flashcard Engine",
+  description: "Milestone 2 PDF ingestion flow for Cuemath Flashcard Engine",
 };
 
 const displayFont = Space_Grotesk({
@@ -63,7 +63,7 @@ export default function RootLayout({
                 ))}
               </nav>
               <p className="rounded-full border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 font-mono text-xs uppercase tracking-[0.16em] text-[var(--ink-dim)]">
-                Milestone 1
+                Milestone 2
               </p>
             </div>
           </header>

@@ -1,4 +1,85 @@
+"use client";
+
+import { useMemo, useState } from "react";
+import Link from "next/link";
+
+type ApiErrorPayload = {
+  message?: string;
+};
+
+type GeneratedCardPreview = {
+  type: "CONCEPT" | "DEFINITION" | "CLOZE" | "EXAMPLE";
+  front: string;
+  back: string;
+};
+
+type DeckResult = {
+  id: string;
+  title: string;
+  sourceFile: string;
+  cardCount: number;
+  provider: "openai" | "fallback";
+  warning: string | null;
+  sampleCards: GeneratedCardPreview[];
+};
+
+type ApiSuccessPayload = {
+  message: string;
+  deck: DeckResult;
+};
+
 export default function UploadPage() {
+  const [file, setFile] = useState<File | null>(null);
+  const [deckTitle, setDeckTitle] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [result, setResult] = useState<DeckResult | null>(null);
+
+  const fileLabel = useMemo(() => {
+    if (!file) {
+      return "No file selected yet";
+    }
+
+    const sizeInMb = (file.size / (1024 * 1024)).toFixed(2);
+    return `${file.name} (${sizeInMb} MB)`;
+  }, [file]);
+
+  const submitUpload = async () => {
+    if (!file) {
+      setErrorMessage("Select a PDF before generating a deck.");
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("deckTitle", deckTitle);
+
+    setIsSubmitting(true);
+    setErrorMessage(null);
+    setResult(null);
+
+    try {
+      const response = await fetch("/api/decks", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorPayload = (await response.json()) as ApiErrorPayload;
+        throw new Error(errorPayload.message ?? "Deck generation failed.");
+      }
+
+      const payload = (await response.json()) as ApiSuccessPayload;
+      setResult(payload.deck);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unexpected upload error.";
+      setErrorMessage(message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   return (
     <section className="shell py-10 md:py-14">
       <header className="border-b border-[var(--line)] pb-8">
@@ -9,8 +90,8 @@ export default function UploadPage() {
           Send one source. Build one focused deck.
         </h2>
         <p className="mt-3 max-w-2xl text-[var(--ink-dim)]">
-          Milestone 2 connects this screen to the ingestion pipeline. The UI is
-          already structured for drag-drop upload, parsing, and generation status.
+          Milestone 2 is live. Upload a PDF to extract text, generate
+          flashcards, and save a review-ready deck.
         </p>
       </header>
 
@@ -19,19 +100,94 @@ export default function UploadPage() {
           <p className="font-mono text-xs uppercase tracking-[0.18em] text-[var(--ink-dim)]">
             Drop Zone
           </p>
-          <p className="mt-2 text-xl font-semibold">Drop your PDF here</p>
+          <p className="mt-2 text-xl font-semibold">Upload your PDF</p>
           <p className="mt-2 max-w-md text-sm text-[var(--ink-dim)]">
-            Supports study notes, textbooks, and lecture handouts. We will split
-            content into meaningful chunks before card generation.
+            Supports study notes, textbooks, and lecture handouts. We parse text
+            and generate concept, definition, cloze, and example cards.
           </p>
-          <div className="mt-8 border border-dashed border-[var(--line)] bg-[rgba(255,255,255,0.65)] p-10 text-center">
+
+          <label
+            htmlFor="pdf-input"
+            className="mt-8 block cursor-pointer border border-dashed border-[var(--line)] bg-[rgba(255,255,255,0.65)] p-8 text-center transition hover:border-[var(--ink)]"
+          >
             <p className="font-mono text-xs uppercase tracking-[0.18em] text-[var(--ink-dim)]">
-              Placeholder
+              PDF Input
             </p>
             <p className="mt-2 text-sm text-[var(--ink-dim)]">
-              Upload interaction will be wired in Milestone 2.
+              Click to choose a file (max 10 MB).
             </p>
+            <p className="mt-3 text-sm font-medium text-[var(--ink)]">
+              {fileLabel}
+            </p>
+          </label>
+          <input
+            id="pdf-input"
+            type="file"
+            accept="application/pdf,.pdf"
+            className="sr-only"
+            onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+          />
+
+          <div className="mt-5 grid gap-3">
+            <label htmlFor="deck-title" className="text-xs uppercase tracking-[0.16em] text-[var(--ink-dim)]">
+              Deck title (optional)
+            </label>
+            <input
+              id="deck-title"
+              value={deckTitle}
+              onChange={(event) => setDeckTitle(event.target.value)}
+              placeholder="Leave blank to use filename"
+              className="w-full border border-[var(--line)] bg-[rgba(255,255,255,0.72)] px-3 py-2 text-sm outline-none transition focus:border-[var(--ink)]"
+            />
           </div>
+
+          <div className="mt-6 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={submitUpload}
+              disabled={isSubmitting}
+              className="border border-[var(--ink)] bg-[var(--ink)] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[var(--accent)] hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-70"
+            >
+              {isSubmitting ? "Generating..." : "Generate deck"}
+            </button>
+            {result ? (
+              <Link
+                href="/decks"
+                className="border border-[var(--line)] bg-[rgba(255,255,255,0.7)] px-4 py-2 text-sm font-medium transition hover:border-[var(--ink)]"
+              >
+                View all decks
+              </Link>
+            ) : null}
+          </div>
+
+          {errorMessage ? (
+            <p className="mt-4 border border-[rgba(170,45,35,0.4)] bg-[rgba(170,45,35,0.08)] px-3 py-2 text-sm text-[rgb(120,32,25)]">
+              {errorMessage}
+            </p>
+          ) : null}
+
+          {result ? (
+            <div className="mt-6 space-y-4 border border-[var(--line)] bg-[rgba(255,255,255,0.76)] p-4">
+              <p className="text-sm font-semibold">
+                Created &quot;{result.title}&quot; with {result.cardCount} cards.
+              </p>
+              <p className="text-xs text-[var(--ink-dim)]">
+                Generator: {result.provider === "openai" ? "OpenAI" : "Fallback"}
+                {result.warning ? ` - ${result.warning}` : ""}
+              </p>
+              <div className="space-y-3">
+                {result.sampleCards.map((card, index) => (
+                  <div key={`${card.front}-${index}`} className="border border-[var(--line)] bg-white/70 p-3">
+                    <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--ink-dim)]">
+                      {card.type}
+                    </p>
+                    <p className="mt-1 text-sm font-medium">{card.front}</p>
+                    <p className="mt-1 text-sm text-[var(--ink-dim)]">{card.back}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <aside className="border-l border-[var(--line)] pl-6 md:pl-8">
@@ -40,9 +196,9 @@ export default function UploadPage() {
           </p>
           <ul className="mt-4 space-y-3 text-sm text-[var(--ink-dim)]">
             <li>PDF only, one file per deck</li>
-            <li>Large files will be chunked before generation</li>
-            <li>API key is read server-side from env</li>
-            <li>Deck title can be edited before final save</li>
+            <li>Max upload size: 10 MB</li>
+            <li>Cards are saved to DB immediately after generation</li>
+            <li>OpenAI key is optional; fallback generation is available</li>
           </ul>
         </aside>
       </div>
