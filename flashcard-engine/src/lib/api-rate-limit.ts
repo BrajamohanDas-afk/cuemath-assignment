@@ -6,7 +6,7 @@ type RateLimitEntry = {
   resetAt: number;
 };
 
-const LIMIT = 10;
+const LIMIT = 50;
 const WINDOW_MS = 60_000;
 
 const globalForRateLimit = globalThis as typeof globalThis & {
