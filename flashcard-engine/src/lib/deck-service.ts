@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   generateFlashcardsFromText,
+  type GenerationDifficulty,
   type GeneratedFlashcard,
 } from "@/lib/flashcard-generation";
 import { extractPdfText, PdfExtractionError } from "@/lib/pdf-extraction";
@@ -26,11 +27,33 @@ const formSchema = z.object({
     },
     z.string().min(2).max(100).optional(),
   ),
+  cardCountPreset: z.preprocess(
+    (value) => {
+      if (typeof value !== "string") {
+        return undefined;
+      }
+      const normalized = value.trim().toLowerCase();
+      return normalized.length === 0 ? undefined : normalized;
+    },
+    z.enum(["few", "standard", "more"]).optional(),
+  ),
+  difficultyPreset: z.preprocess(
+    (value) => {
+      if (typeof value !== "string") {
+        return undefined;
+      }
+      const normalized = value.trim().toLowerCase();
+      return normalized.length === 0 ? undefined : normalized;
+    },
+    z.enum(["easy", "medium", "hard"]).optional(),
+  ),
 });
 
 export interface IngestPdfInput {
   file: File;
   deckTitle?: string;
+  cardCountPreset?: "few" | "standard" | "more";
+  difficultyPreset?: "easy" | "medium" | "hard";
 }
 
 export interface DeckSummary {
@@ -104,6 +127,8 @@ export async function ingestPdfToDeck(
 
   const parsedForm = formSchema.safeParse({
     deckTitle: input.deckTitle,
+    cardCountPreset: input.cardCountPreset,
+    difficultyPreset: input.difficultyPreset,
   });
   if (!parsedForm.success) {
     throw new DeckServiceError("Invalid deck title.", 400);
@@ -121,15 +146,17 @@ export async function ingestPdfToDeck(
     throw new DeckServiceError("Could not parse this PDF right now.", 500);
   }
 
-  const deckTitle =
-    parsedForm.data.deckTitle ??
-    deriveDeckTitleFromFilename(input.file.name) ??
-    "Untitled Deck";
+  const deckTitle = determineDeckTitle({
+    providedTitle: parsedForm.data.deckTitle,
+    fileName: input.file.name,
+    extractedText,
+  });
 
   const generation = await generateFlashcardsFromText({
     deckTitle,
     sourceText: extractedText,
-    maxCards: 16,
+    maxCards: resolveCardCount(parsedForm.data.cardCountPreset),
+    difficulty: resolveDifficulty(parsedForm.data.difficultyPreset),
   });
 
   if (generation.cards.length === 0) {
@@ -144,6 +171,7 @@ export async function ingestPdfToDeck(
     title: deckTitle,
     sourceFile: input.file.name,
     sourceHash,
+    sourceText: extractedText.slice(0, 120_000),
     cards: generation.cards,
   });
 
@@ -178,6 +206,7 @@ async function createDeckWithCards(input: {
   title: string;
   sourceFile: string;
   sourceHash: string;
+  sourceText: string;
   cards: GeneratedFlashcard[];
 }) {
   return prisma.$transaction(async (tx) => {
@@ -186,6 +215,7 @@ async function createDeckWithCards(input: {
         title: input.title,
         sourceFile: input.sourceFile,
         sourceHash: input.sourceHash,
+        sourceText: input.sourceText,
       },
     });
 
@@ -214,12 +244,91 @@ async function createDeckWithCards(input: {
   });
 }
 
+function resolveCardCount(preset?: "few" | "standard" | "more"): number {
+  if (preset === "few") {
+    return 8;
+  }
+  if (preset === "more") {
+    return 24;
+  }
+  return 16;
+}
+
+function resolveDifficulty(
+  preset?: "easy" | "medium" | "hard",
+): GenerationDifficulty {
+  if (preset === "easy" || preset === "hard") {
+    return preset;
+  }
+  return "medium";
+}
+
 function deriveDeckTitleFromFilename(fileName: string): string | null {
-  const normalized = fileName.replace(/\.pdf$/i, "").trim();
-  if (!normalized) {
+  const normalized = normalizeTitle(fileName.replace(/\.pdf$/i, ""));
+  if (!normalized || isWeakTitle(normalized)) {
     return null;
   }
-  return normalized.slice(0, 100);
+  return normalized;
+}
+
+function deriveDeckTitleFromText(extractedText: string): string | null {
+  const lines = extractedText
+    .split("\n")
+    .map((line) => normalizeTitle(line))
+    .filter((line) => line.length >= 4 && line.length <= 80);
+
+  for (const line of lines) {
+    if (/[A-Za-z]{3,}/.test(line) && !isGenericHeading(line)) {
+      return line;
+    }
+  }
+
+  return null;
+}
+
+function determineDeckTitle(input: {
+  providedTitle?: string;
+  fileName: string;
+  extractedText: string;
+}): string {
+  if (input.providedTitle) {
+    return normalizeTitle(input.providedTitle) || "Untitled Deck";
+  }
+
+  return (
+    deriveDeckTitleFromFilename(input.fileName) ??
+    deriveDeckTitleFromText(input.extractedText) ??
+    "Untitled Deck"
+  );
+}
+
+function normalizeTitle(value: string): string {
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/[•●◦▪‣∙]/g, " ")
+    .replace(/[“”„‟«»]/g, "\"")
+    .replace(/[‘’‚‛]/g, "'")
+    .replace(/^[^A-Za-z0-9]+/, "")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .slice(0, 100);
+}
+
+function isWeakTitle(title: string): boolean {
+  if (title.length < 3) {
+    return true;
+  }
+
+  return !/[A-Za-z]{2,}/.test(title);
+}
+
+function isGenericHeading(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    normalized === "table of contents" ||
+    normalized === "contents" ||
+    normalized === "introduction"
+  );
 }
 
 function getDeckStatus(dueCount: number): "Active" | "Steady" | "Calm" {

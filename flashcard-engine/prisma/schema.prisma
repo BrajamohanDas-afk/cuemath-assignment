@@ -33,6 +33,7 @@ model Deck {
   title        String
   sourceFile   String
   sourceHash   String?
+  sourceText   String?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
   lastReviewAt DateTime?
