@@ -350,7 +350,7 @@ export default function ReviewPage() {
           Review Queue
         </p>
         <h2 className="mt-3 text-3xl font-semibold tracking-tight md:text-4xl">
-          Today&apos;s active recall session.
+          Today&apos;s review session.
         </h2>
         <p className="mt-3 max-w-2xl text-[var(--ink-dim)]">
           Real review mode with schedule-aware cards and Again/Hard/Good/Easy

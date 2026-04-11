@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { HomeTokenPanel } from "@/app/home-token-panel";
 
 const flow = [
   {
@@ -36,8 +35,9 @@ export default function Home() {
             Turn any PDF into focused flashcards that actually stick.
           </h2>
           <p className="motion-rise delay-2 mt-5 max-w-xl text-base text-[var(--ink-dim)] md:text-lg">
-            A study engine built around active recall and spaced repetition,
-            designed to improve retention instead of one-time memorization.
+            A study engine built around frequent self-testing and spaced
+            repetition, designed to improve retention instead of one-time
+            memorization.
           </p>
           <div className="motion-rise delay-3 mt-9 flex flex-wrap gap-3">
             <Link
@@ -53,7 +53,6 @@ export default function Home() {
               Open review queue
             </Link>
           </div>
-          <HomeTokenPanel />
         </div>
       </section>
 

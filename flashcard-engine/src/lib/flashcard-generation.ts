@@ -13,8 +13,8 @@ type SupportedCardType = (typeof SUPPORTED_CARD_TYPES)[number];
 
 const aiCardSchema = z.object({
   type: z.enum(SUPPORTED_CARD_TYPES),
-  front: z.string().min(8).max(260),
-  back: z.string().min(16).max(4000),
+  front: z.string().min(8).max(180),
+  back: z.string().min(16).max(700),
   difficulty: z.number().int().min(1).max(5).optional(),
   tags: z.array(z.string().min(1).max(24)).max(6).optional(),
 });
@@ -327,8 +327,9 @@ function buildPrompt(input: {
     "Priorities:",
     "- Cover key concepts and understanding depth.",
     "- Use direct question/answer cards only.",
-    "- Keep front concise and test recall.",
-    "- Keep back clear, practical, and complete (never cut mid-sentence).",
+    "- Keep front concise and test recall (target <= 90 characters).",
+    "- Keep back clear and compact (target <= 280 characters).",
+    "- Do not include raw data dumps, long numeric tables, or repeated examples.",
     "- Do not end answers with trailing connectors like and/or/while/because.",
     "- Mix card types: CONCEPT, DEFINITION, CLOZE, EXAMPLE.",
     "- Add one family marker in tags like family:definition_foundation.",
@@ -422,8 +423,8 @@ function normalizeCards(
   const normalized: GeneratedFlashcard[] = [];
 
   for (const card of cards) {
-    const front = trimForCard(sanitizeCardText(card.front), 260);
-    const back = sanitizeCardText(card.back);
+    const front = normalizeFrontText(card.front);
+    const back = normalizeBackText(card.back);
     const minBackLength = card.type === CardType.CLOZE ? 4 : 12;
 
     if (front.length < 8 || back.length < minBackLength) {
@@ -499,6 +500,9 @@ export function estimateCardQuality(
   }
   if (isIncompleteAnswer(back)) {
     score -= 24;
+  }
+  if (hasExcessiveNumericNoise(back)) {
+    score -= 22;
   }
 
   return clamp(score, 0, 100);
@@ -590,6 +594,47 @@ function sanitizeCardText(value: string): string {
     .trim();
 }
 
+function normalizeFrontText(value: string): string {
+  const cleaned = sanitizeCardText(value)
+    .replace(/^(q|question)\s*[:\-]\s*/i, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+
+  const normalizedTermQuote = cleaned.replace(
+    /^(What is\s+["']?)(.+?)\s+it(["']?\?)$/i,
+    "$1$2$3",
+  );
+  return trimForCard(normalizedTermQuote, 140);
+}
+
+function normalizeBackText(value: string): string {
+  let cleaned = sanitizeCardText(value);
+
+  const exampleIndex = cleaned.search(/\b(?:Ex|Example)\s*:/i);
+  if (exampleIndex > 48) {
+    cleaned = cleaned.slice(0, exampleIndex).trim();
+  }
+
+  if (cleaned.length > 220 && /(?:\bmean\s*=|\bmedian\s*=|\bmode\s*=)/i.test(cleaned)) {
+    cleaned = cleaned.split(/(?:\bmean\s*=|\bmedian\s*=|\bmode\s*=)/i)[0]?.trim() ?? cleaned;
+  }
+
+  if (hasExcessiveNumericNoise(cleaned)) {
+    const firstSentence = cleaned.split(/(?<=[.!?])\s+/)[0]?.trim();
+    if (firstSentence && firstSentence.length >= 12) {
+      cleaned = firstSentence;
+    }
+  }
+
+  return trimForCard(cleaned, 320);
+}
+
+function hasExcessiveNumericNoise(value: string): boolean {
+  const numberTokens = value.match(/\b\d+(?:\.\d+)?\b/g) ?? [];
+  const commaCount = (value.match(/,/g) ?? []).length;
+  return numberTokens.length >= 8 || (numberTokens.length >= 5 && commaCount >= 6);
+}
+
 function collectFallbackCandidates(sourceText: string): string[] {
   const reflowedText = reflowWrappedLines(sourceText);
   const chunks = reflowedText.match(/[^.!?]+[.!?]?/g) ?? [];
@@ -604,6 +649,7 @@ function collectFallbackCandidates(sourceText: string): string[] {
     .filter((chunk) => !isSlideHeadingNoise(chunk))
     .filter((chunk) => !hasAuthorByline(chunk))
     .filter((chunk) => !hasPdfNoise(chunk))
+    .filter((chunk) => !hasExcessiveNumericNoise(chunk))
     .filter((chunk) => hasStatementVerb(chunk))
     .filter((chunk) => /[A-Za-z]{3,}/.test(chunk));
 
@@ -755,8 +801,12 @@ function extractDefinitionPair(value: string): DefinitionPair | null {
   }
 
   const rawTerm = sanitizeCardText(match[1]).replace(/^(the|a|an)\s+/i, "");
+  const normalizedTerm = rawTerm
+    .replace(/\b(it|this|that|these|those)\b$/i, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
   const definition = sanitizeCardText(match[3]);
-  if (rawTerm.length < 3 || rawTerm.split(/\s+/).length > 8) {
+  if (normalizedTerm.length < 3 || normalizedTerm.split(/\s+/).length > 6) {
     return null;
   }
   if (definition.length < 16 || endsWithWeakTerm(definition)) {
@@ -764,7 +814,7 @@ function extractDefinitionPair(value: string): DefinitionPair | null {
   }
 
   return {
-    term: rawTerm,
+    term: normalizedTerm,
     definition,
   };
 }

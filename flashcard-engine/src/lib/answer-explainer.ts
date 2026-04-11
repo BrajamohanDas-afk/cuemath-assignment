@@ -40,9 +40,11 @@ export async function explainAnswerFromSource(
   input: ExplainAnswerInput,
 ): Promise<ExplainAnswerResult> {
   const normalizedSource = input.sourceText.trim();
+  const compactAnswer = compactSnippet(input.cardBack);
+  const compactFront = compactSnippet(input.cardFront);
   const relevantPassages = pickRelevantPassages(
     normalizedSource,
-    `${input.cardFront} ${input.cardBack}`,
+    `${compactFront} ${compactAnswer}`,
   );
 
   const aiResult = await tryOpenAiExplanation({
@@ -64,8 +66,8 @@ export async function explainAnswerFromSource(
   return {
     explanation:
       relevantPassages.length > 0
-        ? `The answer "${input.cardBack}" matches the source material. The excerpts below show the same idea in the uploaded PDF.`
-        : `Could not verify the answer "${input.cardBack}" from the uploaded source text with high confidence.`,
+        ? `The answer "${compactAnswer}" matches the source material. The excerpts below show the same idea in the uploaded PDF.`
+        : `Could not verify the answer "${compactAnswer}" from the uploaded source text with high confidence.`,
     evidence: fallbackEvidence,
     provider: "fallback",
     warning:

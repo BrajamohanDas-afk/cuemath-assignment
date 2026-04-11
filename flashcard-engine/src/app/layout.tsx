@@ -23,6 +23,8 @@ const monoFont = IBM_Plex_Mono({
 
 const navItems = [
   { href: "/", label: "Home" },
+  { href: "/login", label: "Login" },
+  { href: "/account", label: "Account" },
   { href: "/upload", label: "Upload" },
   { href: "/decks", label: "Decks" },
   { href: "/review", label: "Review" },

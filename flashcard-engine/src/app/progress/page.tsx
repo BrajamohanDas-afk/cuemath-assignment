@@ -1,4 +1,5 @@
 import { CardState } from "@prisma/client";
+import { redirect } from "next/navigation";
 import { resolveServerUserId } from "@/lib/auth-user";
 import { prisma } from "@/lib/prisma";
 
@@ -110,6 +111,9 @@ export default async function ProgressPage() {
 
 async function getProgressMetrics() {
   const userId = await resolveServerUserId();
+  if (!userId) {
+    redirect("/login?next=/progress");
+  }
   const now = new Date();
   const todayStart = new Date(now);
   todayStart.setHours(0, 0, 0, 0);

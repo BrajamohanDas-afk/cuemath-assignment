@@ -41,5 +41,6 @@ export async function apiFetch(
   return fetch(input, {
     ...init,
     headers,
+    credentials: init?.credentials ?? "same-origin",
   });
 }

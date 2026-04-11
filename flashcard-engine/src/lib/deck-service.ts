@@ -91,6 +91,9 @@ export async function listDeckSummaries(options?: {
 }): Promise<DeckSummary[]> {
   const includeTiming = options?.includeTiming ?? true;
   const userId = options?.userId ?? (await resolveServerUserId());
+  if (!userId) {
+    throw new DeckServiceError("Unauthorized. Sign in to continue.", 401);
+  }
   const now = new Date();
   const rows = await prisma.$queryRaw<DeckSummaryRow[]>`
     SELECT
@@ -145,6 +148,9 @@ export async function ingestPdfToDeck(
 }> {
   validateUploadedFile(input.file);
   const userId = input.userId ?? (await resolveServerUserId());
+  if (!userId) {
+    throw new DeckServiceError("Unauthorized. Sign in to continue.", 401);
+  }
 
   const parsedForm = formSchema.safeParse({
     deckTitle: input.deckTitle,

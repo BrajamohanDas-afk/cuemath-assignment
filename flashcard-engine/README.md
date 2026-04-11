@@ -1,34 +1,38 @@
 # Flashcard Engine (Cuemath Build Challenge)
 
-Milestone 2 implementation for **Problem 1: The Flashcard Engine**.
+PDF-to-flashcards app with spaced repetition, user-scoped data, and Google OAuth login.
 
-## What is implemented in Milestone 2
+## Implemented Features
 
-- Next.js app shell with core routes:
+- App routes:
   - `/`
+  - `/login`
+  - `/account`
   - `/upload`
   - `/decks`
   - `/review`
   - `/progress`
 - API routes:
   - `GET /api/health`
-  - `GET /api/config` (safe runtime config)
-  - `GET /api/decks` (deck summaries with due counts)
-  - `POST /api/decks` (PDF upload -> extraction -> flashcard generation -> save deck)
-- Database foundation with Prisma schema for:
-  - decks
-  - cards
-  - card schedules (spaced repetition fields)
-  - reviews
-  - sessions
-- Milestone 2 ingestion flow:
-  - server-side PDF extraction with `pdf-parse`
-  - OpenAI-backed card generation when `OPENAI_API_KEY` is set
-  - automatic local fallback generation when key is missing or request fails
-  - deck and card persistence in SQLite via Prisma
-- Environment variable structure via `.env.example`.
+  - `GET /api/config`
+  - `GET|POST|DELETE /api/decks`
+  - `GET|POST /api/review`
+  - `GET /api/auth/google/start`
+  - `GET /api/auth/google/callback`
+  - `POST /api/auth/logout`
+  - `POST /api/auth/delete-account`
+- Database:
+  - `User`, `Deck`, `Card`, `CardSchedule`, `Review`, `Session`, `AuthSession`
+- Ownership enforcement:
+  - Decks/cards/review operations are scoped to the authenticated user
+- Authentication:
+  - Google OAuth login
+  - HttpOnly app session cookie
+  - Account page for sign-out and permanent account deletion
+  - Protected pages (`/account`, `/upload`, `/decks`, `/review`, `/progress`) when Google OAuth is enabled
+  - Automatic local fallback user mode when Google OAuth is not configured in production
 
-## Local setup
+## Local Setup
 
 1. Install dependencies:
 
@@ -36,13 +40,13 @@ Milestone 2 implementation for **Problem 1: The Flashcard Engine**.
 npm install
 ```
 
-2. Create your env file:
+2. Create env file:
 
 ```bash
 cp .env.example .env
 ```
 
-If `cp` is unavailable on Windows PowerShell, use:
+On Windows PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
@@ -54,19 +58,13 @@ Copy-Item .env.example .env
 npm run prisma:generate
 ```
 
-4. Push schema to local SQLite DB:
-
-```bash
-npm run prisma:push
-```
-
-If you are applying the user-ownership migration path, use:
+4. Apply schema/migrations:
 
 ```bash
 npm run prisma:migrate
 ```
 
-5. Run development server:
+5. Start app:
 
 ```bash
 npm run dev
@@ -74,32 +72,54 @@ npm run dev
 
 Open `http://localhost:3000`.
 
+## Google OAuth Configuration
+
+For production isolated user accounts, set:
+
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `APP_BASE_URL` (your deployed app URL)
+
+Google OAuth callback URL:
+
+```text
+https://<your-domain>/api/auth/google/callback
+```
+
+## Environment Variables
+
+See `.env.example` for full template.
+
+- `DATABASE_URL`
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL`
+- `ALLOW_EXTERNAL_LLM`
+- `APP_API_TOKEN`
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `AUTH_SESSION_TTL_DAYS`
+- `APP_BASE_URL`
+
 ## Scripts
 
-- `npm run dev` - start dev server
-- `npm run build` - production build
-- `npm run start` - start production server
-- `npm run lint` - lint project
-- `npm run prisma:generate` - generate Prisma client
-- `npm run prisma:push` - apply schema to DB
-- `npm run prisma:migrate` - create/apply migration (dev)
+- `npm run dev`
+- `npm run build`
+- `npm run start`
+- `npm run lint`
+- `npm run prisma:generate`
+- `npm run prisma:push`
+- `npm run prisma:migrate`
 
-## Security note
+## Security Notes
 
-- Keep `OPENAI_API_KEY` only in server-side env variables.
-- Never expose keys in client code or commit secrets to git.
-- Optional API gate: set `APP_API_TOKEN` to require `x-api-token` (or `app_api_token` cookie) on `/api/decks` and `/api/review`.
-- Optional privacy toggle: set `ALLOW_EXTERNAL_LLM=false` to force fallback-only generation/explanations.
-- When `APP_API_TOKEN` is enabled, save the token once from the home page prompt so browser UI requests include the auth header.
+- Keep all secrets server-side only.
+- Session tokens are stored as SHA-256 hashes in DB.
+- Review and deck APIs require authenticated user context (or local fallback mode if OAuth is disabled).
 
-## User Ownership
+## Verification
 
-- `Deck` now belongs to a `User` via `Deck.userId`.
-- API and review flows enforce user ownership checks for deck/card/session access.
-- Prisma migration is included at `prisma/migrations/20260411_add_user_ownership/migration.sql`.
+Before release:
 
-## Release verification
-
-- Run `npm run lint`
-- Run `npm run build`
-- Run manual checklist in `tests/REGRESSION_CHECKLIST.md`
+- `npm run lint`
+- `npm run build`
+- `npx prisma migrate deploy`

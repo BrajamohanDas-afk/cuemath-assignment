@@ -1,11 +1,18 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
+import { resolveServerUserId } from "@/lib/auth-user";
 import { listDeckSummaries } from "@/lib/deck-service";
 import { DecksTable } from "@/app/decks/decks-table";
 
 export const dynamic = "force-dynamic";
 
 export default async function DecksPage() {
-  const decks = await listDeckSummaries();
+  const userId = await resolveServerUserId();
+  if (!userId) {
+    redirect("/login?next=/decks");
+  }
+
+  const decks = await listDeckSummaries({ userId });
 
   return (
     <section className="shell py-10 md:py-14">

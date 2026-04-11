@@ -99,8 +99,8 @@ export default function UploadPage() {
           Send one source. Build one focused deck.
         </h2>
         <p className="mt-3 max-w-2xl text-[var(--ink-dim)]">
-          Milestone 4 polish is live. Upload a PDF to extract text, generate
-          flashcards, and save a review-ready deck.
+          Upload a PDF to extract text, generate flashcards, and save a
+          review-ready deck.
         </p>
       </header>
 
