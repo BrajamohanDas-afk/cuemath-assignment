@@ -22,9 +22,17 @@ Goal:
   - Prisma schema foundation
   - Typed environment validation
   - Basic API rate limiting
-- Milestone 2 in progress:
+- Milestone 2 completed:
   - Real PDF upload + extraction flow
-  - First-pass card generation and deck persistence
+  - OpenAI + fallback flashcard generation and deck persistence
+- Milestone 3 completed:
+  - Review queue with SM-2 style scheduling (`Again/Hard/Good/Easy`)
+  - Progress metrics and session tracking
+- Milestone 4 in progress:
+  - Deck management polish (search/sort/delete)
+  - Improved empty/error states and failure handling
+  - Mobile table overflow handling and explain-answer flow
+  - Remaining manual tasks: public deploy validation, walkthrough video, final write-up
 
 ## Quick Start
 

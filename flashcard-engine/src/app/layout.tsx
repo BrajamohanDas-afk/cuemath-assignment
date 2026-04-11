@@ -5,7 +5,8 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Flashcard Engine",
-  description: "Milestone 2 PDF ingestion flow for Cuemath Flashcard Engine",
+  description:
+    "Generate flashcards from PDFs and review them with spaced repetition.",
 };
 
 const displayFont = Space_Grotesk({
@@ -39,7 +40,6 @@ export default function RootLayout({
       className={`${displayFont.variable} ${monoFont.variable} h-full antialiased`}
     >
       <body className="min-h-full text-[var(--ink)]">
-        <div className="app-bg" aria-hidden />
         <div className="relative flex min-h-full flex-col">
           <header className="site-header">
             <div className="shell flex flex-wrap items-center justify-between gap-4 py-4">
@@ -63,11 +63,11 @@ export default function RootLayout({
                 ))}
               </nav>
               <p className="rounded-full border border-[var(--line)] bg-[var(--panel)] px-3 py-1.5 font-mono text-xs uppercase tracking-[0.16em] text-[var(--ink-dim)]">
-                Milestone 2
+                Flashcard System
               </p>
             </div>
           </header>
-          <main className="flex-1">{children}</main>
+          <main className="relative z-10 flex-1">{children}</main>
         </div>
       </body>
     </html>

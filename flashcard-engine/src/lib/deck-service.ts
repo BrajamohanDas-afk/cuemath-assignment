@@ -1,6 +1,7 @@
 import { CardType } from "@prisma/client";
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { resolveServerUserId } from "@/lib/auth-user";
 import {
   generateFlashcardsFromText,
   type GenerationDifficulty,
@@ -51,6 +52,7 @@ const formSchema = z.object({
 
 export interface IngestPdfInput {
   file: File;
+  userId?: string;
   deckTitle?: string;
   cardCountPreset?: "few" | "standard" | "more";
   difficultyPreset?: "easy" | "medium" | "hard";
@@ -62,6 +64,9 @@ export interface DeckSummary {
   sourceFile: string;
   createdAt: Date;
   updatedAt: Date;
+  lastReviewAt: Date | null;
+  oldestOverdueAt: Date | null;
+  nextUpcomingDueAt: Date | null;
   cardCount: number;
   dueCount: number;
   status: "Active" | "Steady" | "Calm";
@@ -71,13 +76,21 @@ type DeckSummaryRow = {
   id: string;
   title: string;
   sourceFile: string;
-  createdAt: Date | string;
-  updatedAt: Date | string;
+  createdAt: Date | string | number | bigint;
+  updatedAt: Date | string | number | bigint;
+  lastReviewAt: Date | string | number | bigint | null;
+  oldestOverdueAt: Date | string | number | bigint | null;
+  nextUpcomingDueAt: Date | string | number | bigint | null;
   cardCount: number | bigint | string;
   dueCount: number | bigint | string;
 };
 
-export async function listDeckSummaries(): Promise<DeckSummary[]> {
+export async function listDeckSummaries(options?: {
+  includeTiming?: boolean;
+  userId?: string;
+}): Promise<DeckSummary[]> {
+  const includeTiming = options?.includeTiming ?? true;
+  const userId = options?.userId ?? (await resolveServerUserId());
   const now = new Date();
   const rows = await prisma.$queryRaw<DeckSummaryRow[]>`
     SELECT
@@ -86,6 +99,9 @@ export async function listDeckSummaries(): Promise<DeckSummary[]> {
       d.sourceFile,
       d.createdAt,
       d.updatedAt,
+      d.lastReviewAt,
+      MIN(CASE WHEN ${includeTiming} = 1 AND cs.dueAt <= ${now} THEN cs.dueAt END) AS oldestOverdueAt,
+      MIN(CASE WHEN ${includeTiming} = 1 AND cs.dueAt > ${now} THEN cs.dueAt END) AS nextUpcomingDueAt,
       COUNT(DISTINCT c.id) AS cardCount,
       COUNT(CASE WHEN cs.dueAt <= ${now} THEN 1 END) AS dueCount
     FROM Deck AS d
@@ -93,7 +109,8 @@ export async function listDeckSummaries(): Promise<DeckSummary[]> {
       ON c.deckId = d.id
     LEFT JOIN CardSchedule AS cs
       ON cs.cardId = c.id
-    GROUP BY d.id, d.title, d.sourceFile, d.createdAt, d.updatedAt
+    WHERE d.userId = ${userId}
+    GROUP BY d.id, d.title, d.sourceFile, d.createdAt, d.updatedAt, d.lastReviewAt
     ORDER BY d.updatedAt DESC
   `;
 
@@ -105,6 +122,9 @@ export async function listDeckSummaries(): Promise<DeckSummary[]> {
       sourceFile: row.sourceFile,
       createdAt: toDate(row.createdAt),
       updatedAt: toDate(row.updatedAt),
+      lastReviewAt: toOptionalDate(row.lastReviewAt),
+      oldestOverdueAt: toOptionalDate(row.oldestOverdueAt),
+      nextUpcomingDueAt: toOptionalDate(row.nextUpcomingDueAt),
       cardCount: toNumber(row.cardCount),
       dueCount,
       status: getDeckStatus(dueCount),
@@ -124,6 +144,7 @@ export async function ingestPdfToDeck(
   sampleCards: GeneratedFlashcard[];
 }> {
   validateUploadedFile(input.file);
+  const userId = input.userId ?? (await resolveServerUserId());
 
   const parsedForm = formSchema.safeParse({
     deckTitle: input.deckTitle,
@@ -135,6 +156,9 @@ export async function ingestPdfToDeck(
   }
 
   const fileBytes = Buffer.from(await input.file.arrayBuffer());
+  if (!looksLikePdfBytes(fileBytes)) {
+    throw new DeckServiceError("Uploaded file is not a valid PDF.", 400);
+  }
 
   let extractedText: string;
   try {
@@ -144,6 +168,12 @@ export async function ingestPdfToDeck(
       throw new DeckServiceError(error.message, 422);
     }
     throw new DeckServiceError("Could not parse this PDF right now.", 500);
+  }
+  if (!hasEnoughExtractedText(extractedText)) {
+    throw new DeckServiceError(
+      "This PDF has too little extractable text to build a useful deck.",
+      422,
+    );
   }
 
   const deckTitle = determineDeckTitle({
@@ -168,6 +198,7 @@ export async function ingestPdfToDeck(
 
   const sourceHash = createHash("sha256").update(fileBytes).digest("hex");
   const createdDeck = await createDeckWithCards({
+    userId,
     title: deckTitle,
     sourceFile: input.file.name,
     sourceHash,
@@ -203,6 +234,7 @@ function validateUploadedFile(file: File) {
 }
 
 async function createDeckWithCards(input: {
+  userId: string;
   title: string;
   sourceFile: string;
   sourceHash: string;
@@ -212,6 +244,7 @@ async function createDeckWithCards(input: {
   return prisma.$transaction(async (tx) => {
     const deck = await tx.deck.create({
       data: {
+        userId: input.userId,
         title: input.title,
         sourceFile: input.sourceFile,
         sourceHash: input.sourceHash,
@@ -353,8 +386,85 @@ function toNumber(value: number | bigint | string): number {
   return value;
 }
 
-function toDate(value: Date | string): Date {
-  return value instanceof Date ? value : new Date(value);
+function toDate(value: Date | string | number | bigint): Date {
+  if (value instanceof Date) {
+    return value;
+  }
+
+  if (typeof value === "bigint") {
+    return new Date(normalizeEpochMs(Number(value)));
+  }
+
+  if (typeof value === "number") {
+    return new Date(normalizeEpochMs(value));
+  }
+
+  const date = new Date(value);
+  if (!Number.isNaN(date.getTime())) {
+    return date;
+  }
+
+  const numeric = Number(value);
+  if (!Number.isNaN(numeric)) {
+    return new Date(normalizeEpochMs(numeric));
+  }
+
+  throw new DeckServiceError("Invalid date value returned from database.", 500);
+}
+
+function toOptionalDate(
+  value: Date | string | number | bigint | null,
+): Date | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === "string" && value.trim().length === 0) {
+    return null;
+  }
+  return toDate(value);
+}
+
+function hasEnoughExtractedText(value: string): boolean {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length < 220) {
+    return false;
+  }
+
+  const unicodeWordCount = (normalized.match(/\p{L}[\p{L}\p{N}]*/gu) ?? [])
+    .length;
+  if (unicodeWordCount >= 55) {
+    return true;
+  }
+
+  const letterCount = (normalized.match(/\p{L}/gu) ?? []).length;
+  return letterCount >= 160;
+}
+
+function normalizeEpochMs(value: number): number {
+  if (!Number.isFinite(value)) {
+    return value;
+  }
+
+  const abs = Math.abs(value);
+  if (abs < 1e11) {
+    return value * 1000;
+  }
+  if (abs > 1e14 && abs <= 1e17) {
+    return Math.trunc(value / 1000);
+  }
+  if (abs > 1e17) {
+    return Math.trunc(value / 1_000_000);
+  }
+  return value;
+}
+
+function looksLikePdfBytes(bytes: Buffer): boolean {
+  if (bytes.length < 5) {
+    return false;
+  }
+
+  const signature = bytes.subarray(0, 5).toString("ascii");
+  return signature === "%PDF-";
 }
 
 export class DeckServiceError extends Error {

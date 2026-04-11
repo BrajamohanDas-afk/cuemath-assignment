@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { apiFetch } from "@/lib/api-access";
 
 type DeleteDeckButtonProps = {
   deckId: string;
@@ -18,7 +19,7 @@ export function DeleteDeckButton({ deckId, deckTitle }: DeleteDeckButtonProps) {
     setIsDeleting(true);
     setErrorMessage(null);
     try {
-      const response = await fetch("/api/decks", {
+      const response = await apiFetch("/api/decks", {
         method: "DELETE",
         headers: {
           "Content-Type": "application/json",

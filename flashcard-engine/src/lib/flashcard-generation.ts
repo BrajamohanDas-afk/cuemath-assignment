@@ -29,6 +29,7 @@ export interface GeneratedFlashcard {
   back: string;
   difficulty: number;
   tags: string[];
+  qualityScore: number;
 }
 
 export interface GenerationResult {
@@ -39,46 +40,63 @@ export interface GenerationResult {
 
 export type GenerationDifficulty = "easy" | "medium" | "hard";
 
+type QuestionFamily =
+  | "definition_foundation"
+  | "explanation_understanding"
+  | "difference_comparison"
+  | "identification"
+  | "output_based"
+  | "application_based"
+  | "use_case"
+  | "error_debugging"
+  | "step_by_step"
+  | "concept_linking"
+  | "rules_constraints"
+  | "advantages_disadvantages"
+  | "cause_effect"
+  | "scenario_based"
+  | "best_practice"
+  | "fill_missing"
+  | "keyword_based"
+  | "real_life_analogy"
+  | "quick_fact"
+  | "deep_why"
+  | "reverse_question"
+  | "trick_question"
+  | "memory_hook"
+  | "build_design";
+
+const QUESTION_FAMILIES: readonly QuestionFamily[] = [
+  "definition_foundation",
+  "explanation_understanding",
+  "difference_comparison",
+  "identification",
+  "output_based",
+  "application_based",
+  "use_case",
+  "error_debugging",
+  "step_by_step",
+  "concept_linking",
+  "rules_constraints",
+  "advantages_disadvantages",
+  "cause_effect",
+  "scenario_based",
+  "best_practice",
+  "fill_missing",
+  "keyword_based",
+  "real_life_analogy",
+  "quick_fact",
+  "deep_why",
+  "reverse_question",
+  "trick_question",
+  "memory_hook",
+  "build_design",
+] as const;
+
 type DefinitionPair = {
   term: string;
   definition: string;
-  termTag: string;
 };
-
-type QuestionMode =
-  | "basic_recall"
-  | "cloze"
-  | "mcq"
-  | "true_false"
-  | "matching"
-  | "typing"
-  | "problem_solving"
-  | "ordering"
-  | "conceptual_why"
-  | "scenario"
-  | "rapid_fire"
-  | "confidence"
-  | "case_study"
-  | "hint_based"
-  | "reverse_thinking";
-
-const ALL_QUESTION_MODES: readonly QuestionMode[] = [
-  "basic_recall",
-  "cloze",
-  "mcq",
-  "true_false",
-  "matching",
-  "typing",
-  "problem_solving",
-  "ordering",
-  "conceptual_why",
-  "scenario",
-  "rapid_fire",
-  "confidence",
-  "case_study",
-  "hint_based",
-  "reverse_thinking",
-] as const;
 
 interface GenerationInput {
   deckTitle: string;
@@ -97,6 +115,27 @@ interface OpenAiChatResponse {
   choices?: OpenAiChatChoice[];
 }
 
+type QuestionContext = {
+  sentence: string;
+  answerText: string;
+  primaryTerm: string;
+  secondaryTerm: string | null;
+  acronym: string | null;
+  codeHint: string | null;
+  tags: string[];
+};
+
+type QuestionTemplate = {
+  id: string;
+  family: QuestionFamily;
+  cardType: SupportedCardType;
+  difficultyOffset: number;
+  requiresSecondary?: boolean;
+  requiresAcronym?: boolean;
+  build: (ctx: QuestionContext) => string;
+  buildBack?: (ctx: QuestionContext) => string;
+};
+
 export async function generateFlashcardsFromText(
   input: GenerationInput,
 ): Promise<GenerationResult> {
@@ -106,7 +145,7 @@ export async function generateFlashcardsFromText(
 
   const aiAttempt = await tryOpenAiGeneration({
     deckTitle: input.deckTitle,
-    sourceText: sourceText.slice(0, 16000),
+    sourceText,
     maxCards,
     difficulty,
   });
@@ -128,12 +167,64 @@ async function tryOpenAiGeneration(input: {
   maxCards: number;
   difficulty: GenerationDifficulty;
 }): Promise<GenerationResult> {
+  const sourceChunks = splitSourceIntoChunks(input.sourceText, {
+    maxChars: 5_500,
+    maxChunks: 3,
+  });
+  const chunkBudgets = distributeCardBudget(input.maxCards + 6, sourceChunks.length);
+  const results = await mapWithConcurrency(
+    sourceChunks.map((sourceText, chunkIndex) => ({
+      sourceText,
+      chunkIndex,
+      maxCards: chunkBudgets[chunkIndex] ?? input.maxCards,
+    })),
+    2,
+    async (item) =>
+      tryOpenAiGenerationForChunk({
+        deckTitle: input.deckTitle,
+        sourceText: item.sourceText ?? "",
+        maxCards: item.maxCards,
+        difficulty: input.difficulty,
+        chunkLabel: `Chunk ${item.chunkIndex + 1} / ${sourceChunks.length}`,
+      }),
+  );
+
+  const collectedCards = results.flatMap((result) => result.cards);
+  const warnings = results
+    .map((result) => result.warning)
+    .filter((warning): warning is string => Boolean(warning));
+
+  if (collectedCards.length > 0) {
+    return {
+      cards: normalizeCards(collectedCards, input.maxCards),
+      provider: "openai",
+      warning: warnings.length > 0 ? warnings.join(" ") : null,
+    };
+  }
+
+  return {
+    cards: [],
+    provider: "openai",
+    warning:
+      warnings.join(" ") ||
+      "OpenAI generation produced no usable cards. Used local fallback generation.",
+  };
+}
+
+async function tryOpenAiGenerationForChunk(input: {
+  deckTitle: string;
+  sourceText: string;
+  maxCards: number;
+  difficulty: GenerationDifficulty;
+  chunkLabel: string;
+}): Promise<GenerationResult> {
   const env = getEnv();
-  if (!env.OPENAI_API_KEY) {
+  if (!env.OPENAI_API_KEY || !env.ALLOW_EXTERNAL_LLM) {
     return {
       cards: [],
       provider: "openai",
-      warning: "OPENAI_API_KEY is not set. Used local fallback generation.",
+      warning:
+        "External LLM is disabled or OPENAI_API_KEY is not set. Used local fallback generation.",
     };
   }
 
@@ -191,7 +282,8 @@ async function tryOpenAiGeneration(input: {
       return {
         cards: [],
         provider: "openai",
-        warning: "OpenAI returned invalid JSON schema. Used local fallback generation.",
+        warning:
+          "OpenAI returned invalid JSON schema. Used local fallback generation.",
       };
     }
 
@@ -224,24 +316,29 @@ function buildPrompt(input: {
   sourceText: string;
   maxCards: number;
   difficulty: GenerationDifficulty;
+  chunkLabel?: string;
 }): string {
   return [
     `Deck title: ${input.deckTitle}`,
+    input.chunkLabel ? `Source segment: ${input.chunkLabel}` : null,
     `Generate ${input.maxCards} flashcards from the provided study material.`,
     `Target difficulty: ${input.difficulty.toUpperCase()}.`,
-    `Allowed question styles: ${ALL_QUESTION_MODES.join(", ")}.`,
+    `Question families available: ${QUESTION_FAMILIES.join(", ")}.`,
     "Priorities:",
-    "- Cover key concepts, definitions, relationships, and examples.",
+    "- Cover key concepts and understanding depth.",
+    "- Use direct question/answer cards only.",
     "- Keep front concise and test recall.",
     "- Keep back clear, practical, and complete (never cut mid-sentence).",
     "- Do not end answers with trailing connectors like and/or/while/because.",
     "- Mix card types: CONCEPT, DEFINITION, CLOZE, EXAMPLE.",
-    "- Respect selected styles and keep strong variation.",
+    "- Add one family marker in tags like family:definition_foundation.",
     "- difficulty is 1 (easy) to 5 (hard) and should match target difficulty.",
-    'Return JSON only in format: {"cards":[{"type":"CONCEPT","front":"...","back":"...","difficulty":3,"tags":["topic"]}]}',
+    'Return JSON only in format: {"cards":[{"type":"CONCEPT","front":"...","back":"...","difficulty":3,"tags":["topic","family:definition_foundation"]}]}',
     "Study material:",
-    input.sourceText,
-  ].join("\n");
+    input.sourceText.slice(0, 9_000),
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
 }
 
 function buildFallbackCards(
@@ -249,10 +346,32 @@ function buildFallbackCards(
   maxCards: number,
   difficulty: GenerationDifficulty,
 ): GeneratedFlashcard[] {
-  const uniqueSentences = collectFallbackCandidates(sourceText).slice(
-    0,
-    maxCards * 3,
-  );
+  const chunks = splitSourceIntoChunks(sourceText, {
+    maxChars: 3_800,
+    maxChunks: 8,
+  });
+  const budgets = distributeCardBudget(maxCards * 2, chunks.length);
+  const cards: GeneratedFlashcard[] = [];
+
+  for (let index = 0; index < chunks.length; index += 1) {
+    cards.push(
+      ...buildFallbackCardsForChunk(
+        chunks[index] ?? "",
+        budgets[index] ?? maxCards,
+        difficulty,
+      ),
+    );
+  }
+
+  return normalizeCards(cards, maxCards);
+}
+
+function buildFallbackCardsForChunk(
+  sourceText: string,
+  maxCards: number,
+  difficulty: GenerationDifficulty,
+): GeneratedFlashcard[] {
+  const uniqueSentences = collectFallbackCandidates(sourceText).slice(0, maxCards * 4);
   const cards: GeneratedFlashcard[] = [];
   const targetDifficulty = getFallbackDifficulty(difficulty);
   let templateCursor = 0;
@@ -273,17 +392,20 @@ function buildFallbackCards(
     const template = templates[templateCursor % templates.length];
     templateCursor += 1;
 
-    const backText = template.buildBack ? template.buildBack(context) : context.answerText;
+    const front = template.build(context);
+    const back = template.buildBack ? template.buildBack(context) : context.answerText;
+
     cards.push({
       type: template.cardType,
-      front: template.build(context),
-      back: backText,
+      front,
+      back,
       difficulty: clamp(targetDifficulty + template.difficultyOffset, 1, 5),
-      tags: sanitizeTags([...context.tags, template.id]),
+      tags: sanitizeTags([...context.tags, `family:${template.family}`, template.id]),
+      qualityScore: 0,
     });
   }
 
-  return normalizeCards(cards, maxCards);
+  return cards;
 }
 
 function normalizeCards(
@@ -300,20 +422,19 @@ function normalizeCards(
   const normalized: GeneratedFlashcard[] = [];
 
   for (const card of cards) {
-    if (normalized.length >= maxCards) {
-      break;
-    }
-
     const front = trimForCard(sanitizeCardText(card.front), 260);
     const back = sanitizeCardText(card.back);
     const minBackLength = card.type === CardType.CLOZE ? 4 : 12;
+
     if (front.length < 8 || back.length < minBackLength) {
       continue;
     }
     if (isIncompleteAnswer(back)) {
       continue;
     }
-    if (isLowQualityPair(front, back)) {
+
+    const skipPairCheck = /^Given this answer:/i.test(front);
+    if (!skipPairCheck && isLowQualityPair(front, back)) {
       continue;
     }
 
@@ -323,16 +444,108 @@ function normalizeCards(
     }
     seen.add(dedupeKey);
 
+    const qualityScore = estimateCardQuality(front, back, card.type);
+    if (qualityScore < 45) {
+      continue;
+    }
+
     normalized.push({
       type: card.type,
       front,
       back,
       difficulty: clamp(card.difficulty ?? 2, 1, 5),
-      tags: sanitizeTags(card.tags ?? []),
+      tags: sanitizeTags([...(card.tags ?? []), `quality:${qualityScore}`]),
+      qualityScore,
     });
   }
 
-  return normalized;
+  return prioritizeCoverageAndQuality(normalized, maxCards);
+}
+
+export function estimateCardQuality(
+  front: string,
+  back: string,
+  type: SupportedCardType,
+): number {
+  let score = 50;
+
+  const frontWords = front.trim().split(/\s+/).filter(Boolean).length;
+  const backWords = back.trim().split(/\s+/).filter(Boolean).length;
+
+  if (frontWords >= 4 && frontWords <= 18) {
+    score += 10;
+  }
+  if (backWords >= 12 && backWords <= 90) {
+    score += 16;
+  }
+  if (/[?]$/.test(front)) {
+    score += 8;
+  }
+  if (/^(what|why|how|when|where|which|define|difference)\b/i.test(front)) {
+    score += 8;
+  }
+  if (type === CardType.EXAMPLE || type === CardType.CLOZE) {
+    score += 4;
+  }
+
+  if (backWords < 8 || back.length < 40) {
+    score -= 20;
+  }
+  if (front.length > 220) {
+    score -= 16;
+  }
+  if (isLowQualityPair(front, back)) {
+    score -= 30;
+  }
+  if (isIncompleteAnswer(back)) {
+    score -= 24;
+  }
+
+  return clamp(score, 0, 100);
+}
+
+function prioritizeCoverageAndQuality(
+  cards: GeneratedFlashcard[],
+  maxCards: number,
+): GeneratedFlashcard[] {
+  const sorted = [...cards].sort((a, b) => b.qualityScore - a.qualityScore);
+  const byType = new Map<SupportedCardType, GeneratedFlashcard[]>(
+    SUPPORTED_CARD_TYPES.map((type) => [type, []]),
+  );
+
+  for (const card of sorted) {
+    byType.get(card.type)?.push(card);
+  }
+
+  const selected: GeneratedFlashcard[] = [];
+  const selectedKeys = new Set<string>();
+
+  for (const type of SUPPORTED_CARD_TYPES) {
+    const top = byType.get(type)?.[0];
+    if (!top) {
+      continue;
+    }
+
+    const key = `${top.front.toLowerCase()}|${top.back.toLowerCase()}`;
+    if (!selectedKeys.has(key)) {
+      selected.push(top);
+      selectedKeys.add(key);
+    }
+  }
+
+  for (const card of sorted) {
+    if (selected.length >= maxCards) {
+      break;
+    }
+    const key = `${card.front.toLowerCase()}|${card.back.toLowerCase()}`;
+    if (selectedKeys.has(key)) {
+      continue;
+    }
+    selected.push(card);
+    selectedKeys.add(key);
+  }
+
+  return selected.slice(0, maxCards);
 }
 
 function parseJsonContent(content: string): unknown {
@@ -353,7 +566,7 @@ function sanitizeTags(tags: string[]): string[] {
       tags
         .map((tag) => tag.trim().toLowerCase())
         .filter((tag) => tag.length > 0)
-        .slice(0, 4),
+        .slice(0, 6),
     ),
   );
 }
@@ -367,9 +580,10 @@ function trimForCard(value: string, maxLen: number): string {
 
 function sanitizeCardText(value: string): string {
   return value
-    .replace(/[•●◦▪‣∙]/g, " ")
-    .replace(/[“”„‟«»]/g, "\"")
-    .replace(/[‘’‚‛]/g, "'")
+    .replace(/[\u2022\u25CF\u25E6\u25AA\u2023\u2219\u00B7]/g, " ")
+    .replace(/[\u201C\u201D\u201E\u201F\u00AB\u00BB]/g, "\"")
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+    .replace(/\u00C2/g, "")
     .replace(/^[\s"'`.,;:!?-]+/, "")
     .replace(/\s+[;:,.-]+$/, "")
     .replace(/\s{2,}/g, " ")
@@ -428,6 +642,61 @@ function reflowWrappedLines(sourceText: string): string {
   return merged.join("\n");
 }
 
+function splitSourceIntoChunks(
+  sourceText: string,
+  options: { maxChars: number; maxChunks: number },
+): string[] {
+  const normalized = reflowWrappedLines(sourceText);
+  const lines = normalized
+    .split("\n")
+    .map((line) => sanitizeCardText(line))
+    .filter((line) => line.length > 0);
+
+  if (lines.length === 0) {
+    return [sourceText.slice(0, options.maxChars)];
+  }
+
+  const chunks: string[] = [];
+  let buffer = "";
+
+  for (const line of lines) {
+    const isHeading = isLikelyHeading(line);
+    const canSplitOnHeading =
+      isHeading && buffer.length >= Math.floor(options.maxChars * 0.55);
+    const wouldOverflow = buffer.length + line.length + 1 > options.maxChars;
+
+    if ((canSplitOnHeading || wouldOverflow) && buffer.length > 0) {
+      chunks.push(buffer.trim());
+      buffer = line;
+      continue;
+    }
+
+    buffer = buffer ? `${buffer} ${line}` : line;
+  }
+
+  if (buffer.trim()) {
+    chunks.push(buffer.trim());
+  }
+
+  const uniqueChunks = Array.from(new Set(chunks.map((chunk) => chunk.trim()))).filter(
+    (chunk) => chunk.length > 0,
+  );
+
+  if (uniqueChunks.length === 0) {
+    return [sourceText.slice(0, options.maxChars)];
+  }
+
+  return uniqueChunks.slice(0, options.maxChunks);
+}
+
+function distributeCardBudget(totalCards: number, bucketCount: number): number[] {
+  const count = Math.max(1, bucketCount);
+  const base = Math.max(1, Math.floor(totalCards / count));
+  const remainder = Math.max(0, totalCards - base * count);
+
+  return Array.from({ length: count }, (_, index) => base + (index < remainder ? 1 : 0));
+}
+
 function shouldJoinLines(current: string, next: string): boolean {
   if (isLikelyHeading(current) || isLikelyHeading(next)) {
     return false;
@@ -478,7 +747,7 @@ function endsWithWeakTerm(value: string): boolean {
 function extractDefinitionPair(value: string): DefinitionPair | null {
   const cleaned = sanitizeCardText(value);
   const match = cleaned.match(
-    /^([A-Za-z][A-Za-z0-9()\/\- ]{2,80})\s+(is|are|refers to|means|describes)\s+(.+)$/i,
+    /^([A-Za-z][A-Za-z0-9()\/ -]{2,80})\s+(is|are|refers to|means|describes)\s+(.+)$/i,
   );
 
   if (!match) {
@@ -497,8 +766,33 @@ function extractDefinitionPair(value: string): DefinitionPair | null {
   return {
     term: rawTerm,
     definition,
-    termTag: rawTerm.toLowerCase(),
   };
+}
+
+function extractKeywords(sentence: string, maxCount: number): string[] {
+  const rawTokens = sentence.match(/[A-Za-z][A-Za-z0-9-]*/g) ?? [];
+  const rankedTokens = Array.from(
+    new Set(
+      rawTokens
+        .map((token) => token.trim())
+        .filter((token) => token.length >= 4)
+        .filter((token) => !COMMON_STOPWORDS.has(token.toLowerCase())),
+    ),
+  ).sort((a, b) => b.length - a.length);
+
+  return rankedTokens.slice(0, maxCount);
+}
+
+function extractAcronym(sentence: string): string | null {
+  const match = sentence.match(/\b[A-Z]{2,8}\b/);
+  return match ? match[0] : null;
+}
+
+function extractCodeHint(sentence: string): string | null {
+  if (!/[{}()[\];=<>+*/]/.test(sentence)) {
+    return null;
+  }
+  return trimForCard(sentence, 120);
 }
 
 function normalizeComparable(value: string): string {
@@ -521,7 +815,6 @@ function isLowQualityPair(front: string, back: string): boolean {
     return true;
   }
 
-  // Reject near-copy question/answer pairs.
   const shorter = nf.length <= nb.length ? nf : nb;
   const longer = nf.length > nb.length ? nf : nb;
   if (shorter.length >= 20 && longer.includes(shorter)) {
@@ -556,26 +849,6 @@ function isIncompleteAnswer(value: string): boolean {
   return false;
 }
 
-type QuestionContext = {
-  sentence: string;
-  answerText: string;
-  primaryTerm: string;
-  secondaryTerm: string | null;
-  acronym: string | null;
-  tags: string[];
-};
-
-type QuestionTemplate = {
-  id: string;
-  mode: QuestionMode;
-  cardType: SupportedCardType;
-  difficultyOffset: number;
-  requiresSecondary?: boolean;
-  requiresAcronym?: boolean;
-  build: (ctx: QuestionContext) => string;
-  buildBack?: (ctx: QuestionContext) => string;
-};
-
 function buildQuestionContext(
   sentence: string,
   definitionPair: DefinitionPair | null,
@@ -584,6 +857,7 @@ function buildQuestionContext(
   const primaryTerm = definitionPair?.term ?? keywords[0] ?? "this concept";
   const secondaryTerm = keywords.find((token) => token !== primaryTerm) ?? null;
   const acronym = extractAcronym(sentence);
+  const codeHint = extractCodeHint(sentence);
   const answerText = definitionPair?.definition ?? sentence;
 
   return {
@@ -592,6 +866,7 @@ function buildQuestionContext(
     primaryTerm,
     secondaryTerm,
     acronym,
+    codeHint,
     tags: [sanitizeCardText(primaryTerm).toLowerCase()],
   };
 }
@@ -608,191 +883,208 @@ function getApplicableTemplates(ctx: QuestionContext): QuestionTemplate[] {
   });
 }
 
-function extractKeywords(sentence: string, maxCount: number): string[] {
-  const rawTokens = sentence.match(/[A-Za-z][A-Za-z0-9-]*/g) ?? [];
-  const rankedTokens = Array.from(
-    new Set(
-      rawTokens
-        .map((token) => token.trim())
-        .filter((token) => token.length >= 4)
-        .filter((token) => !COMMON_STOPWORDS.has(token.toLowerCase())),
-    ),
-  ).sort((a, b) => b.length - a.length);
-
-  return rankedTokens.slice(0, maxCount);
-}
-
-function extractAcronym(sentence: string): string | null {
-  const match = sentence.match(/\b[A-Z]{2,8}\b/);
-  return match ? match[0] : null;
-}
-
 function q(term: string): string {
   return `"${sanitizeCardText(term)}"`;
 }
 
 const QUESTION_TEMPLATES: QuestionTemplate[] = [
   {
-    id: "definition_what_is",
-    mode: "basic_recall",
+    id: "foundation_what_is",
+    family: "definition_foundation",
     cardType: CardType.DEFINITION,
     difficultyOffset: 0,
-    build: (ctx) => `What ${copulaForTerm(ctx.primaryTerm)} ${q(ctx.primaryTerm)}?`,
+    build: (ctx) => `What is ${q(ctx.primaryTerm)}?`,
   },
   {
-    id: "definition_define_simple",
-    mode: "basic_recall",
+    id: "foundation_define_simple",
+    family: "definition_foundation",
     cardType: CardType.DEFINITION,
     difficultyOffset: 0,
     build: (ctx) => `Define ${q(ctx.primaryTerm)} in simple terms.`,
   },
   {
-    id: "definition_meaning",
-    mode: "basic_recall",
-    cardType: CardType.DEFINITION,
-    difficultyOffset: 0,
-    build: (ctx) => `What does ${q(ctx.primaryTerm)} mean?`,
-  },
-  {
-    id: "cloze_fill",
-    mode: "cloze",
-    cardType: CardType.CLOZE,
-    difficultyOffset: 1,
-    build: (ctx) => `Fill in the blank: ${q(ctx.primaryTerm)} is used for _____.`,
-    buildBack: (ctx) => `${ctx.primaryTerm}. ${ctx.answerText}`,
-  },
-  {
-    id: "mcq_single",
-    mode: "mcq",
+    id: "understanding_explain",
+    family: "explanation_understanding",
     cardType: CardType.CONCEPT,
     difficultyOffset: 1,
-    build: (ctx) =>
-      [
-        `MCQ: Which option best matches ${q(ctx.primaryTerm)}?`,
-        "A) A completely unrelated concept",
-        `B) ${trimForCard(ctx.answerText, 80)}`,
-        "C) A contradictory statement",
-        "D) None of the above",
-      ].join("\n"),
-    buildBack: (ctx) =>
-      `Correct option: B.\n${ctx.answerText}`,
-  },
-  {
-    id: "true_false_check",
-    mode: "true_false",
-    cardType: CardType.CONCEPT,
-    difficultyOffset: 1,
-    build: (ctx) =>
-      `True or False: ${q(ctx.primaryTerm)} has no practical role in engineering.`,
-    buildBack: (ctx) => `False. ${ctx.answerText}`,
-  },
-  {
-    id: "matching_pair",
-    mode: "matching",
-    cardType: CardType.EXAMPLE,
-    difficultyOffset: 1,
-    build: (ctx) =>
-      `Match the concept with the correct explanation: ${q(ctx.primaryTerm)}`,
-    buildBack: (ctx) => `${ctx.primaryTerm} -> ${ctx.answerText}`,
-  },
-  {
-    id: "typing_active_recall",
-    mode: "typing",
-    cardType: CardType.DEFINITION,
-    difficultyOffset: 1,
-    build: (ctx) => `Type the best definition for ${q(ctx.primaryTerm)}.`,
-  },
-  {
-    id: "problem_solving_apply",
-    mode: "problem_solving",
-    cardType: CardType.CONCEPT,
-    difficultyOffset: 2,
     build: (ctx) => `Explain how ${q(ctx.primaryTerm)} works.`,
   },
   {
-    id: "ordering_steps",
-    mode: "ordering",
-    cardType: CardType.CONCEPT,
-    difficultyOffset: 2,
-    build: (ctx) => `What are the steps involved in ${q(ctx.primaryTerm)}?`,
-  },
-  {
-    id: "conceptual_why",
-    mode: "conceptual_why",
-    cardType: CardType.CONCEPT,
-    difficultyOffset: 1,
-    build: (ctx) => `Why does ${q(ctx.primaryTerm)} matter?`,
-  },
-  {
-    id: "scenario_choice",
-    mode: "scenario",
-    cardType: CardType.CONCEPT,
-    difficultyOffset: 2,
-    build: (ctx) =>
-      `Scenario: You are designing a system. When would you choose ${q(ctx.primaryTerm)}?`,
-  },
-  {
-    id: "rapid_fire_fact",
-    mode: "rapid_fire",
-    cardType: CardType.CONCEPT,
-    difficultyOffset: 1,
-    build: (ctx) => `Rapid fire: give one key fact about ${q(ctx.primaryTerm)}.`,
-  },
-  {
-    id: "confidence_probe",
-    mode: "confidence",
-    cardType: CardType.CONCEPT,
-    difficultyOffset: 1,
-    build: (ctx) => `How confident are you about ${q(ctx.primaryTerm)} and why?`,
-  },
-  {
-    id: "case_study_long",
-    mode: "case_study",
-    cardType: CardType.EXAMPLE,
-    difficultyOffset: 2,
-    build: (ctx) => `Case study: explain ${q(ctx.primaryTerm)} in a real-world context.`,
-  },
-  {
-    id: "hint_based_progressive",
-    mode: "hint_based",
-    cardType: CardType.CLOZE,
-    difficultyOffset: 1,
-    build: (ctx) =>
-      `Hint-based recall:\nHint 1: ${trimForCard(ctx.answerText, 60)}\nHint 2: Focus on ${q(ctx.primaryTerm)}\nFinal answer?`,
-    buildBack: (ctx) => `${ctx.primaryTerm}. ${ctx.answerText}`,
-  },
-  {
-    id: "reverse_thinking",
-    mode: "reverse_thinking",
-    cardType: CardType.CONCEPT,
-    difficultyOffset: 2,
-    build: (ctx) => `Given this answer, what is the question?\nAnswer: ${trimForCard(ctx.answerText, 120)}`,
-  },
-  {
-    id: "compare_when_to_use",
-    mode: "scenario",
-    cardType: CardType.EXAMPLE,
-    difficultyOffset: 2,
-    requiresSecondary: true,
-    build: (ctx) =>
-      `When should you use ${q(ctx.primaryTerm)} over ${q(ctx.secondaryTerm ?? "alternative approaches")}?`,
-  },
-  {
-    id: "compare_difference",
-    mode: "conceptual_why",
+    id: "comparison_difference",
+    family: "difference_comparison",
     cardType: CardType.CONCEPT,
     difficultyOffset: 2,
     requiresSecondary: true,
     build: (ctx) =>
-      `Difference between ${q(ctx.primaryTerm)} and ${q(ctx.secondaryTerm ?? "alternative approaches")}.`,
+      `Difference between ${q(ctx.primaryTerm)} and ${q(ctx.secondaryTerm ?? "related concepts")}.`,
   },
   {
-    id: "identify_from_description",
-    mode: "basic_recall",
+    id: "identification_description",
+    family: "identification",
     cardType: CardType.CONCEPT,
     difficultyOffset: 1,
     build: (ctx) =>
       `Identify the concept from this description: ${trimForCard(ctx.answerText, 120)}`,
+  },
+  {
+    id: "output_predict",
+    family: "output_based",
+    cardType: CardType.EXAMPLE,
+    difficultyOffset: 2,
+    build: (ctx) =>
+      ctx.codeHint
+        ? `Predict the output/result of this snippet: ${ctx.codeHint}`
+        : `What will be the output or result when applying ${q(ctx.primaryTerm)}?`,
+  },
+  {
+    id: "application_use_in_scenario",
+    family: "application_based",
+    cardType: CardType.EXAMPLE,
+    difficultyOffset: 2,
+    build: (ctx) =>
+      `How would you use ${q(ctx.primaryTerm)} in a practical scenario?`,
+  },
+  {
+    id: "use_case_when_should",
+    family: "use_case",
+    cardType: CardType.CONCEPT,
+    difficultyOffset: 2,
+    build: (ctx) => `When should you use ${q(ctx.primaryTerm)}?`,
+  },
+  {
+    id: "debugging_why_failing",
+    family: "error_debugging",
+    cardType: CardType.CONCEPT,
+    difficultyOffset: 2,
+    build: (ctx) =>
+      `What can go wrong with ${q(ctx.primaryTerm)}, and why would it fail?`,
+  },
+  {
+    id: "steps_process",
+    family: "step_by_step",
+    cardType: CardType.CONCEPT,
+    difficultyOffset: 2,
+    build: (ctx) => `What are the key steps of ${q(ctx.primaryTerm)}?`,
+  },
+  {
+    id: "linking_relationship",
+    family: "concept_linking",
+    cardType: CardType.CONCEPT,
+    difficultyOffset: 2,
+    requiresSecondary: true,
+    build: (ctx) =>
+      `How is ${q(ctx.primaryTerm)} related to ${q(ctx.secondaryTerm ?? "another concept")}?`,
+  },
+  {
+    id: "rules_constraints",
+    family: "rules_constraints",
+    cardType: CardType.CONCEPT,
+    difficultyOffset: 2,
+    build: (ctx) =>
+      `What are the main rules or constraints of ${q(ctx.primaryTerm)}?`,
+  },
+  {
+    id: "pros_cons",
+    family: "advantages_disadvantages",
+    cardType: CardType.CONCEPT,
+    difficultyOffset: 2,
+    build: (ctx) =>
+      `What are the advantages and disadvantages of ${q(ctx.primaryTerm)}?`,
+  },
+  {
+    id: "cause_effect",
+    family: "cause_effect",
+    cardType: CardType.CONCEPT,
+    difficultyOffset: 2,
+    build: (ctx) =>
+      `What happens if ${q(ctx.primaryTerm)} is ignored or applied incorrectly?`,
+  },
+  {
+    id: "scenario_best_choice",
+    family: "scenario_based",
+    cardType: CardType.EXAMPLE,
+    difficultyOffset: 2,
+    build: (ctx) =>
+      `Given a real-world situation, what is the best approach using ${q(ctx.primaryTerm)}?`,
+  },
+  {
+    id: "best_practice",
+    family: "best_practice",
+    cardType: CardType.CONCEPT,
+    difficultyOffset: 2,
+    build: (ctx) =>
+      `What is the best practice for ${q(ctx.primaryTerm)}?`,
+  },
+  {
+    id: "fill_missing",
+    family: "fill_missing",
+    cardType: CardType.CLOZE,
+    difficultyOffset: 1,
+    build: (ctx) => `Complete the statement: ${q(ctx.primaryTerm)} is used for _____.`,
+    buildBack: (ctx) => `${ctx.primaryTerm} is used for ${ctx.answerText}`,
+  },
+  {
+    id: "keyword_based",
+    family: "keyword_based",
+    cardType: CardType.DEFINITION,
+    difficultyOffset: 1,
+    build: (ctx) =>
+      `What keyword or core term is associated with ${q(ctx.primaryTerm)}?`,
+  },
+  {
+    id: "analogy",
+    family: "real_life_analogy",
+    cardType: CardType.EXAMPLE,
+    difficultyOffset: 2,
+    build: (ctx) =>
+      `What real-life analogy helps explain ${q(ctx.primaryTerm)}?`,
+  },
+  {
+    id: "quick_fact",
+    family: "quick_fact",
+    cardType: CardType.CONCEPT,
+    difficultyOffset: 1,
+    build: (ctx) => `Give one quick fact about ${q(ctx.primaryTerm)}.`,
+  },
+  {
+    id: "deep_why",
+    family: "deep_why",
+    cardType: CardType.CONCEPT,
+    difficultyOffset: 3,
+    build: (ctx) =>
+      `Why is ${q(ctx.primaryTerm)} designed this way? Why not a simpler alternative?`,
+  },
+  {
+    id: "reverse_question",
+    family: "reverse_question",
+    cardType: CardType.CONCEPT,
+    difficultyOffset: 2,
+    build: (ctx) =>
+      `Given this answer: ${trimForCard(ctx.answerText, 130)} What is the question?`,
+  },
+  {
+    id: "trick_question",
+    family: "trick_question",
+    cardType: CardType.CONCEPT,
+    difficultyOffset: 2,
+    build: (ctx) =>
+      `Spot the mistake in this statement about ${q(ctx.primaryTerm)}.`,
+  },
+  {
+    id: "memory_hook",
+    family: "memory_hook",
+    cardType: CardType.DEFINITION,
+    difficultyOffset: 1,
+    requiresAcronym: true,
+    build: (ctx) => `Expand ${q(ctx.acronym ?? ctx.primaryTerm)} (full form).`,
+  },
+  {
+    id: "build_design",
+    family: "build_design",
+    cardType: CardType.EXAMPLE,
+    difficultyOffset: 3,
+    build: (ctx) =>
+      `How would you design or architect a solution using ${q(ctx.primaryTerm)}?`,
   },
 ];
 
@@ -891,19 +1183,6 @@ function isSlideHeadingNoise(value: string): boolean {
   return false;
 }
 
-function copulaForTerm(term: string): "is" | "are" {
-  const cleaned = sanitizeCardText(term).toLowerCase();
-  const lastWord = cleaned.split(/\s+/).filter(Boolean).pop() ?? cleaned;
-  if (!lastWord) {
-    return "is";
-  }
-
-  if (/s$/.test(lastWord) && !/(ss|us|is)$/.test(lastWord)) {
-    return "are";
-  }
-  return "is";
-}
-
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -920,4 +1199,25 @@ function getFallbackDifficulty(difficulty: GenerationDifficulty): number {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
+}
+
+async function mapWithConcurrency<TInput, TOutput>(
+  items: TInput[],
+  concurrency: number,
+  mapper: (item: TInput) => Promise<TOutput>,
+): Promise<TOutput[]> {
+  const safeConcurrency = Math.max(1, Math.min(concurrency, items.length || 1));
+  const results = new Array<TOutput>(items.length);
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await mapper(items[index] as TInput);
+    }
+  }
+
+  await Promise.all(Array.from({ length: safeConcurrency }, () => worker()));
+  return results;
 }

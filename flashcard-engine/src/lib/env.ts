@@ -7,6 +7,11 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1).default("file:./prisma/dev.db"),
   OPENAI_API_KEY: z.string().min(1).optional(),
   OPENAI_MODEL: z.string().min(1).default("gpt-4o-mini"),
+  ALLOW_EXTERNAL_LLM: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+  APP_API_TOKEN: z.string().min(16).optional(),
   APP_BASE_URL: z.string().url().optional(),
 });
 
@@ -24,6 +29,8 @@ export function getEnv(): AppEnv {
     DATABASE_URL: process.env.DATABASE_URL,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
     OPENAI_MODEL: process.env.OPENAI_MODEL,
+    ALLOW_EXTERNAL_LLM: process.env.ALLOW_EXTERNAL_LLM,
+    APP_API_TOKEN: process.env.APP_API_TOKEN,
     APP_BASE_URL: process.env.APP_BASE_URL,
   });
 
@@ -43,7 +50,7 @@ export function getSafeRuntimeConfig() {
   return {
     nodeEnv: env.NODE_ENV,
     appBaseUrl: env.APP_BASE_URL ?? null,
-    hasOpenAiKey: Boolean(env.OPENAI_API_KEY),
-    openAiModel: env.OPENAI_MODEL,
+    externalLlmEnabled: env.ALLOW_EXTERNAL_LLM,
+    apiTokenRequired: Boolean(env.APP_API_TOKEN),
   };
 }

@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
+import { ApiAuthError, resolveApiUserId } from "@/lib/auth-user";
 import { enforceApiRateLimit } from "@/lib/api-rate-limit";
 import {
   explainCardAnswer,
@@ -18,9 +19,22 @@ const querySchema = z.object({
 });
 
 export async function GET(request: NextRequest) {
-  const rateLimitResponse = enforceApiRateLimit(request);
+  const rateLimitResponse = enforceApiRateLimit(request, { bucket: "read" });
   if (rateLimitResponse) {
     return rateLimitResponse;
+  }
+
+  let userId: string;
+  try {
+    userId = await resolveApiUserId(request);
+  } catch (error) {
+    if (error instanceof ApiAuthError) {
+      return NextResponse.json(
+        { message: error.message },
+        { status: error.statusCode },
+      );
+    }
+    return NextResponse.json({ message: "Unauthorized." }, { status: 401 });
   }
 
   const parsed = querySchema.safeParse({
@@ -36,7 +50,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const queue = await getReviewQueue(parsed.data.deckId, {
+    const queue = await getReviewQueue(parsed.data.deckId, userId, {
       excludeCardId: parsed.data.excludeCardId,
     });
     return NextResponse.json({ queue });
@@ -56,9 +70,24 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const rateLimitResponse = enforceApiRateLimit(request);
+  const rateLimitResponse = enforceApiRateLimit(request, {
+    bucket: "mutation",
+  });
   if (rateLimitResponse) {
     return rateLimitResponse;
+  }
+
+  let userId: string;
+  try {
+    userId = await resolveApiUserId(request);
+  } catch (error) {
+    if (error instanceof ApiAuthError) {
+      return NextResponse.json(
+        { message: error.message },
+        { status: error.statusCode },
+      );
+    }
+    return NextResponse.json({ message: "Unauthorized." }, { status: 401 });
   }
 
   try {
@@ -70,12 +99,12 @@ export async function POST(request: NextRequest) {
 
     if (isExplainRequest) {
       const input = parseExplainAnswerInput(payload);
-      const explanation = await explainCardAnswer(input);
+      const explanation = await explainCardAnswer(input, userId);
       return NextResponse.json(explanation);
     }
 
     const ratingInput = parseSubmitReviewInput(payload);
-    const ratingResult = await submitReviewRating(ratingInput);
+    const ratingResult = await submitReviewRating(ratingInput, userId);
     return NextResponse.json(ratingResult);
   } catch (error) {
     if (error instanceof ReviewServiceError) {

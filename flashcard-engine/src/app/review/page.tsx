@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { apiFetch } from "@/lib/api-access";
 
 type DeckItem = {
   id: string;
@@ -47,8 +49,32 @@ type ExplainResponse = {
   source: "uploaded_pdf";
 };
 
+type SessionStats = {
+  reviewed: number;
+  correct: number;
+  again: number;
+  hard: number;
+  good: number;
+  easy: number;
+};
+
+const INITIAL_SESSION_STATS: SessionStats = {
+  reviewed: 0,
+  correct: 0,
+  again: 0,
+  hard: 0,
+  good: 0,
+  easy: 0,
+};
+
 const RATINGS = ["AGAIN", "HARD", "GOOD", "EASY"] as const;
 type RatingValue = (typeof RATINGS)[number];
+const RATING_HINTS: Record<RatingValue, string> = {
+  AGAIN: "10m",
+  HARD: "soon",
+  GOOD: "later",
+  EASY: "much later",
+};
 
 export default function ReviewPage() {
   const [decks, setDecks] = useState<DeckItem[]>([]);
@@ -64,12 +90,19 @@ export default function ReviewPage() {
   const [isExplaining, setIsExplaining] = useState(false);
   const [explainError, setExplainError] = useState<string | null>(null);
   const [explainResult, setExplainResult] = useState<ExplainResponse | null>(null);
+  const [sessionStats, setSessionStats] = useState<SessionStats>(
+    INITIAL_SESSION_STATS,
+  );
+  const [sessionDueTotal, setSessionDueTotal] = useState<number | null>(null);
+  const selectedDeckRef = useRef<string>("");
+  const submitRequestIdRef = useRef(0);
+  const loadQueueRequestIdRef = useRef(0);
 
   const loadDecks = useCallback(async (preferredDeckId?: string) => {
     setLoadingDecks(true);
     setErrorMessage(null);
     try {
-      const response = await fetch("/api/decks");
+      const response = await apiFetch("/api/decks?view=review");
       const payload = (await response.json()) as {
         decks: DeckItem[];
         message?: string;
@@ -110,16 +143,26 @@ export default function ReviewPage() {
   }, [loadDecks]);
 
   useEffect(() => {
+    selectedDeckRef.current = selectedDeckId;
+  }, [selectedDeckId]);
+
+  useEffect(() => {
     if (!selectedDeckId) {
       setQueue(null);
+      setSessionStats({ ...INITIAL_SESSION_STATS });
+      setSessionDueTotal(null);
       return;
     }
 
     setSessionId(null);
+    setSessionStats({ ...INITIAL_SESSION_STATS });
+    setSessionDueTotal(null);
     void loadQueue(selectedDeckId);
   }, [selectedDeckId]);
 
   async function loadQueue(deckId: string, excludeCardId?: string) {
+    const requestId = loadQueueRequestIdRef.current + 1;
+    loadQueueRequestIdRef.current = requestId;
     setLoadingQueue(true);
     setErrorMessage(null);
 
@@ -128,24 +171,42 @@ export default function ReviewPage() {
       if (excludeCardId) {
         params.set("excludeCardId", excludeCardId);
       }
-      const response = await fetch(`/api/review?${params.toString()}`);
+      const response = await apiFetch(`/api/review?${params.toString()}`);
       const payload = (await response.json()) as QueuePayload & { message?: string };
 
       if (!response.ok) {
         throw new Error(payload.message ?? "Failed to load review queue.");
       }
 
+      if (
+        loadQueueRequestIdRef.current !== requestId ||
+        selectedDeckRef.current !== deckId
+      ) {
+        return;
+      }
+
       setQueue(payload.queue);
+      setSessionDueTotal((current) => {
+        if (current !== null) {
+          return current;
+        }
+        return payload.queue.card ? payload.queue.dueCount : 0;
+      });
       setShowAnswer(false);
       setCardStartTime(payload.queue.card ? Date.now() : null);
       setExplainError(null);
       setExplainResult(null);
     } catch (error) {
+      if (loadQueueRequestIdRef.current !== requestId) {
+        return;
+      }
       setErrorMessage(
         error instanceof Error ? error.message : "Failed to load review queue.",
       );
     } finally {
-      setLoadingQueue(false);
+      if (loadQueueRequestIdRef.current === requestId) {
+        setLoadingQueue(false);
+      }
     }
   }
 
@@ -156,19 +217,22 @@ export default function ReviewPage() {
 
     setSubmitting(true);
     setErrorMessage(null);
+    const requestDeckId = selectedDeckId;
+    const requestId = submitRequestIdRef.current + 1;
+    submitRequestIdRef.current = requestId;
 
     const responseTimeMs = cardStartTime
       ? Math.max(1, Date.now() - cardStartTime)
       : undefined;
 
     try {
-      const response = await fetch("/api/review", {
+      const response = await apiFetch("/api/review", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          deckId: selectedDeckId,
+          deckId: requestDeckId,
           cardId: queue.card.id,
           rating,
           responseTimeMs,
@@ -181,19 +245,45 @@ export default function ReviewPage() {
         throw new Error(payload.message ?? "Failed to submit card rating.");
       }
 
+      if (
+        submitRequestIdRef.current !== requestId ||
+        selectedDeckRef.current !== requestDeckId
+      ) {
+        return;
+      }
+
       setSessionId(payload.sessionId);
+      setSessionStats((current) => ({
+        reviewed: current.reviewed + 1,
+        correct: current.correct + (rating === "GOOD" || rating === "EASY" ? 1 : 0),
+        again: current.again + (rating === "AGAIN" ? 1 : 0),
+        hard: current.hard + (rating === "HARD" ? 1 : 0),
+        good: current.good + (rating === "GOOD" ? 1 : 0),
+        easy: current.easy + (rating === "EASY" ? 1 : 0),
+      }));
       setQueue(payload.queue);
       setShowAnswer(false);
       setCardStartTime(payload.queue.card ? Date.now() : null);
       setExplainError(null);
       setExplainResult(null);
-      await loadDecks(selectedDeckId);
+      setDecks((currentDecks) =>
+        currentDecks.map((deck) =>
+          deck.id === requestDeckId
+            ? {
+                ...deck,
+                dueCount: Math.max(payload.queue.dueCount, 0),
+              }
+            : deck,
+        ),
+      );
     } catch (error) {
       setErrorMessage(
         error instanceof Error ? error.message : "Failed to submit card rating.",
       );
     } finally {
-      setSubmitting(false);
+      if (submitRequestIdRef.current === requestId) {
+        setSubmitting(false);
+      }
     }
   }
 
@@ -217,7 +307,7 @@ export default function ReviewPage() {
     setExplainError(null);
 
     try {
-      const response = await fetch("/api/review", {
+      const response = await apiFetch("/api/review", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -242,6 +332,16 @@ export default function ReviewPage() {
       setIsExplaining(false);
     }
   }
+
+  const nextDeckWithDueId =
+    decks.find((deck) => deck.id !== selectedDeckId && deck.dueCount > 0)?.id ??
+    null;
+  const dueTotal = sessionDueTotal ?? 0;
+  const dueRemaining = queue?.dueCount ?? 0;
+  const dueCompleted = Math.max(0, dueTotal - dueRemaining);
+  const currentCardIndex = queue?.card ? Math.min(dueTotal, dueCompleted + 1) : dueTotal;
+  const progressPercent =
+    dueTotal > 0 ? Math.round((Math.max(0, currentCardIndex - 1) / dueTotal) * 100) : 0;
 
   return (
     <section className="shell relative z-10 py-10 md:py-14">
@@ -281,7 +381,7 @@ export default function ReviewPage() {
               value={selectedDeckId}
               onChange={(event) => setSelectedDeckId(event.target.value)}
               className="mt-2 w-full border border-[var(--line)] bg-[rgba(255,255,255,0.72)] px-3 py-2 text-sm outline-none transition focus:border-[var(--ink)]"
-              disabled={loadingDecks || decks.length === 0}
+              disabled={loadingDecks || submitting || decks.length === 0}
             >
               {decks.length === 0 ? (
                 <option value="">No decks available</option>
@@ -330,12 +430,38 @@ export default function ReviewPage() {
               <p className="text-sm text-[var(--ink-dim)]">
                 Pick another deck or come back when cards become due.
               </p>
+              {sessionStats.reviewed > 0 ? (
+                <div className="mt-4 border border-[var(--line)] bg-[rgba(255,255,255,0.76)] p-4">
+                  <p className="font-mono text-xs uppercase tracking-[0.14em] text-[var(--ink-dim)]">
+                    Session Summary
+                  </p>
+                  <p className="mt-2 text-sm">
+                    Reviewed {sessionStats.reviewed} cards with{" "}
+                    {Math.round((sessionStats.correct / sessionStats.reviewed) * 100)}% correct.
+                  </p>
+                  <p className="mt-1 text-xs text-[var(--ink-dim)]">
+                    Again {sessionStats.again} | Hard {sessionStats.hard} | Good{" "}
+                    {sessionStats.good} | Easy {sessionStats.easy}
+                  </p>
+                </div>
+              ) : null}
             </div>
           ) : null}
 
           {!loadingQueue && queue?.card ? (
             <>
               <div className="mt-4 min-w-0 border border-[var(--line)] bg-[rgba(255,255,255,0.72)] p-5 md:p-7">
+                <div className="mb-5 border border-[var(--line)] bg-[rgba(255,255,255,0.82)] p-3">
+                  <p className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--ink-dim)]">
+                    Card {currentCardIndex} of {dueTotal} due today
+                  </p>
+                  <div className="mt-2 h-1.5 overflow-hidden bg-[rgba(19,21,26,0.12)]">
+                    <div
+                      className="h-full bg-[var(--ink)] transition-all"
+                      style={{ width: `${progressPercent}%` }}
+                    />
+                  </div>
+                </div>
                 <p className="font-mono text-xs uppercase tracking-[0.14em] text-[var(--ink-dim)]">
                   {queue.dueCount} / {queue.totalCardCount}
                 </p>
@@ -423,25 +549,59 @@ export default function ReviewPage() {
                 >
                   Skip
                 </button>
-                {RATINGS.map((rating) => (
-                  <button
-                    key={rating}
-                    type="button"
-                    disabled={submitting || !showAnswer}
-                    onClick={() => void submitRating(rating)}
-                    className="border border-[var(--line)] bg-[rgba(255,255,255,0.72)] px-3 py-2 text-sm font-medium transition hover:border-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {rating === "AGAIN"
-                      ? "Again"
-                      : rating === "HARD"
-                        ? "Hard"
-                        : rating === "GOOD"
-                          ? "Good"
-                          : "Easy"}
-                  </button>
-                ))}
+                {showAnswer ? (
+                  RATINGS.map((rating) => (
+                    <button
+                      key={rating}
+                      type="button"
+                      disabled={submitting}
+                      onClick={() => void submitRating(rating)}
+                      className="border border-[var(--line)] bg-[rgba(255,255,255,0.72)] px-3 py-2 text-left text-sm font-medium transition hover:border-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <span className="block">
+                        {rating === "AGAIN"
+                          ? "Again"
+                          : rating === "HARD"
+                            ? "Hard"
+                            : rating === "GOOD"
+                              ? "Good"
+                              : "Easy"}
+                      </span>
+                      <span className="mt-0.5 block text-[11px] font-normal uppercase tracking-[0.1em] text-[var(--ink-dim)]">
+                        {RATING_HINTS[rating]}
+                      </span>
+                    </button>
+                  ))
+                ) : (
+                  <p className="col-span-1 border border-[var(--line)] bg-[rgba(255,255,255,0.72)] px-3 py-2 text-xs uppercase tracking-[0.12em] text-[var(--ink-dim)] sm:col-span-4">
+                    Reveal answer to rate this card
+                  </p>
+                )}
               </div>
             </>
+          ) : null}
+
+          {!loadingQueue && !queue?.card && sessionStats.reviewed > 0 ? (
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  if (nextDeckWithDueId) {
+                    setSelectedDeckId(nextDeckWithDueId);
+                  }
+                }}
+                disabled={!nextDeckWithDueId}
+                className="border border-[var(--line)] bg-[rgba(255,255,255,0.78)] px-4 py-2 text-sm font-medium transition hover:border-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Review another deck
+              </button>
+              <Link
+                href="/progress"
+                className="border border-[var(--line)] bg-[rgba(255,255,255,0.78)] px-4 py-2 text-sm font-medium transition hover:border-[var(--ink)]"
+              >
+                Back tomorrow
+              </Link>
+            </div>
           ) : null}
         </div>
       </div>

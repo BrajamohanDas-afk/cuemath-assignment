@@ -30,6 +30,7 @@ enum ReviewRating {
 
 model Deck {
   id           String    @id @default(cuid())
+  userId       String    @default("local-default-user")
   title        String
   sourceFile   String
   sourceHash   String?
@@ -37,10 +38,20 @@ model Deck {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
   lastReviewAt DateTime?
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   cards        Card[]
   sessions     Session[]
 
   @@index([createdAt])
+  @@index([userId, updatedAt])
+}
+
+model User {
+  id          String   @id
+  externalKey String   @unique
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  decks       Deck[]
 }
 
 model Card {

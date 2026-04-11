@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { HomeTokenPanel } from "@/app/home-token-panel";
 
 const flow = [
   {
@@ -29,7 +30,7 @@ export default function Home() {
         />
         <div className="shell relative grid min-h-[calc(100svh-86px)] content-center py-16">
           <p className="motion-rise text-[0.72rem] font-mono uppercase tracking-[0.24em] text-[var(--accent)]">
-            Cuemath Build Challenge
+            Flashcard Engine
           </p>
           <h2 className="motion-rise delay-1 mt-4 max-w-3xl text-5xl font-semibold leading-[1.02] tracking-tight md:text-7xl">
             Turn any PDF into focused flashcards that actually stick.
@@ -52,6 +53,7 @@ export default function Home() {
               Open review queue
             </Link>
           </div>
+          <HomeTokenPanel />
         </div>
       </section>
 
@@ -83,25 +85,25 @@ export default function Home() {
         <div className="grid gap-10 border-t border-[var(--line)] pt-10 md:grid-cols-[1.15fr_0.85fr] md:items-end">
           <div className="relative overflow-hidden border border-[var(--line)] bg-[var(--panel)] p-8 md:p-10">
             <p className="font-mono text-xs uppercase tracking-[0.18em] text-[var(--accent)]">
-              Product Direction
+              Built For Learning
             </p>
             <p className="mt-4 max-w-xl text-2xl font-semibold leading-tight">
-              Milestone 1 establishes the engine shell. Milestone 2 connects real
-              PDF ingestion and AI-backed deck generation.
+              Upload once, generate quality cards, and retain knowledge with
+              spaced repetition.
             </p>
             <p className="mt-4 text-sm text-[var(--ink-dim)]">
-              Core routes, safe runtime config, and data schema are already
-              prepared for the full workflow.
+              The workflow stays focused: PDF ingestion, structured flashcards,
+              review scheduling, and progress tracking in one place.
             </p>
           </div>
           <div className="border-l border-[var(--line)] pl-6 md:pl-8">
             <p className="font-mono text-xs uppercase tracking-[0.16em] text-[var(--ink-dim)]">
-              Next Up
+              What You Get
             </p>
-            <p className="mt-3 text-3xl font-semibold leading-tight">Milestone 2</p>
+            <p className="mt-3 text-3xl font-semibold leading-tight">Real Study Workflow</p>
             <p className="mt-2 text-sm text-[var(--ink-dim)]">
-              Upload, parse, and generate first-pass flashcards from real study
-              material.
+              Decks, review queue, and progress insights backed by persistent
+              data and user-scoped access control.
             </p>
           </div>
         </div>
@@ -112,15 +114,15 @@ export default function Home() {
           <div className="flex flex-wrap items-end justify-between gap-6">
             <div>
               <p className="font-mono text-xs uppercase tracking-[0.16em] text-[var(--ink-dim)]">
-                Ready to Continue
+                Ready To Start
               </p>
               <p className="mt-2 text-2xl font-semibold tracking-tight">
-                Continue with Milestone 2 implementation.
+                Build your first deck from a PDF.
               </p>
             </div>
             <Link
               href="/upload"
-              className="rounded-full border border-[var(--ink)] px-6 py-2.5 text-sm font-semibold transition hover:bg-[var(--ink)] hover:text-[#f7f3eb]"
+              className="rounded-full border border-[var(--line)] bg-[var(--panel)] px-6 py-2.5 text-sm font-semibold text-[var(--ink)] transition hover:border-[var(--ink)]"
             >
               Go to upload flow
             </Link>

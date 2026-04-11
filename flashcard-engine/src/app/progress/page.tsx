@@ -1,4 +1,5 @@
 import { CardState } from "@prisma/client";
+import { resolveServerUserId } from "@/lib/auth-user";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -10,16 +11,19 @@ export default async function ProgressPage() {
     {
       label: "Mastered",
       value: metrics.masteredPct,
+      count: metrics.masteredCount,
       detail: "Cards in stable review state",
     },
     {
       label: "Shaky",
       value: metrics.shakyPct,
+      count: metrics.shakyCount,
       detail: "Learning or recently lapsed cards",
     },
     {
       label: "New",
       value: metrics.newPct,
+      count: metrics.newCount,
       detail: "Cards not reviewed yet",
     },
   ];
@@ -48,7 +52,7 @@ export default async function ProgressPage() {
               <div className="flex items-center justify-between text-sm">
                 <span className="font-medium">{metric.label}</span>
                 <span className="font-mono text-xs text-[var(--ink-dim)]">
-                  {metric.value}%
+                  {metric.value}% ({metric.count})
                 </span>
               </div>
               <div className="h-2 overflow-hidden bg-[rgba(19,21,26,0.12)]">
@@ -66,28 +70,38 @@ export default async function ProgressPage() {
           <p className="font-mono text-xs uppercase tracking-[0.16em] text-[var(--ink-dim)]">
             Session Signals
           </p>
-          <dl className="mt-4 grid gap-5 text-sm">
+          <div className="mt-4 grid gap-5 text-sm">
             <div>
-              <dt className="text-[var(--ink-dim)]">Cards due now</dt>
-              <dd className="mt-1 text-3xl font-semibold">{metrics.dueNow}</dd>
+              <p className="text-[var(--ink-dim)]">Cards due now</p>
+              <p className="mt-1 text-3xl font-semibold">{metrics.dueNow}</p>
             </div>
             <div>
-              <dt className="text-[var(--ink-dim)]">Current streak</dt>
-              <dd className="mt-1 text-3xl font-semibold">
-                {metrics.streakDays} days
-              </dd>
+              <p className="text-[var(--ink-dim)]">Still due today</p>
+              <p className="mt-1 text-3xl font-semibold">{metrics.dueLaterToday}</p>
             </div>
             <div>
-              <dt className="text-[var(--ink-dim)]">Average response time</dt>
-              <dd className="mt-1 text-3xl font-semibold">
+              <p className="text-[var(--ink-dim)]">Due tomorrow</p>
+              <p className="mt-1 text-3xl font-semibold">{metrics.dueTomorrow}</p>
+            </div>
+            <div>
+              <p className="text-[var(--ink-dim)]">Due in next 7 days</p>
+              <p className="mt-1 text-3xl font-semibold">{metrics.dueNext7Days}</p>
+            </div>
+            <div>
+              <p className="text-[var(--ink-dim)]">Current streak</p>
+              <p className="mt-1 text-3xl font-semibold">{metrics.streakDays} days</p>
+            </div>
+            <div>
+              <p className="text-[var(--ink-dim)]">Average response time</p>
+              <p className="mt-1 text-3xl font-semibold">
                 {metrics.avgResponseSeconds}s
-              </dd>
+              </p>
             </div>
             <div>
-              <dt className="text-[var(--ink-dim)]">Total reviews logged</dt>
-              <dd className="mt-1 text-3xl font-semibold">{metrics.totalReviews}</dd>
+              <p className="text-[var(--ink-dim)]">Total reviews logged</p>
+              <p className="mt-1 text-3xl font-semibold">{metrics.totalReviews}</p>
             </div>
-          </dl>
+          </div>
         </div>
       </div>
     </section>
@@ -95,21 +109,95 @@ export default async function ProgressPage() {
 }
 
 async function getProgressMetrics() {
+  const userId = await resolveServerUserId();
   const now = new Date();
   const todayStart = new Date(now);
   todayStart.setHours(0, 0, 0, 0);
+  const tomorrowStart = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000);
+  const dayAfterTomorrowStart = new Date(
+    tomorrowStart.getTime() + 24 * 60 * 60 * 1000,
+  );
+  const nextSevenDaysEnd = new Date(
+    tomorrowStart.getTime() + 7 * 24 * 60 * 60 * 1000,
+  );
 
-  const [totalCards, dueNow, stateGroups, reviewAggregate, totalReviews, streakDays] =
-    await Promise.all([
-      prisma.card.count(),
+  const [
+    totalCards,
+    dueNow,
+    dueLaterToday,
+    dueTomorrow,
+    dueNext7Days,
+    stateGroups,
+    reviewAggregate,
+    totalReviews,
+    streakDays,
+  ] = await Promise.all([
+      prisma.card.count({
+        where: {
+          deck: {
+            userId,
+          },
+        },
+      }),
       prisma.cardSchedule.count({
         where: {
           dueAt: {
             lte: now,
           },
+          card: {
+            deck: {
+              userId,
+            },
+          },
+        },
+      }),
+      prisma.cardSchedule.count({
+        where: {
+          dueAt: {
+            gt: now,
+            lt: tomorrowStart,
+          },
+          card: {
+            deck: {
+              userId,
+            },
+          },
+        },
+      }),
+      prisma.cardSchedule.count({
+        where: {
+          dueAt: {
+            gte: tomorrowStart,
+            lt: dayAfterTomorrowStart,
+          },
+          card: {
+            deck: {
+              userId,
+            },
+          },
+        },
+      }),
+      prisma.cardSchedule.count({
+        where: {
+          dueAt: {
+            gte: tomorrowStart,
+            lt: nextSevenDaysEnd,
+          },
+          card: {
+            deck: {
+              userId,
+            },
+          },
         },
       }),
       prisma.cardSchedule.groupBy({
+        where: {
+          card: {
+            deck: {
+              userId,
+            },
+          },
+        },
         by: ["state"],
         _count: {
           state: true,
@@ -117,6 +205,11 @@ async function getProgressMetrics() {
       }),
       prisma.review.aggregate({
         where: {
+          card: {
+            deck: {
+              userId,
+            },
+          },
           responseTimeMs: {
             not: null,
           },
@@ -125,8 +218,16 @@ async function getProgressMetrics() {
           responseTimeMs: true,
         },
       }),
-      prisma.review.count(),
-      calculateStreakDays(todayStart),
+      prisma.review.count({
+        where: {
+          card: {
+            deck: {
+              userId,
+            },
+          },
+        },
+      }),
+      calculateStreakDays(todayStart, userId),
     ]);
 
   const stateCountMap = new Map<CardState, number>(
@@ -139,25 +240,46 @@ async function getProgressMetrics() {
     (stateCountMap.get(CardState.RELEARNING) ?? 0);
 
   const denominator = Math.max(totalCards, 1);
-  const masteredPct = Math.round((masteredCount / denominator) * 100);
-  const shakyPct = Math.round((shakyCount / denominator) * 100);
-  const newPct = Math.max(0, 100 - masteredPct - shakyPct);
+  let masteredPct = Math.round((masteredCount / denominator) * 100);
+  let shakyPct = Math.round((shakyCount / denominator) * 100);
+  const newCount = Math.max(totalCards - masteredCount - shakyCount, 0);
+  let newPct = 100 - masteredPct - shakyPct;
+
+  if (newPct < 0) {
+    const overflow = Math.abs(newPct);
+    const shakyReduction = Math.min(shakyPct, overflow);
+    shakyPct -= shakyReduction;
+    const remainingOverflow = overflow - shakyReduction;
+    if (remainingOverflow > 0) {
+      masteredPct = Math.max(0, masteredPct - remainingOverflow);
+    }
+    newPct = 0;
+  }
 
   const avgResponseMs = reviewAggregate._avg.responseTimeMs ?? 0;
   const avgResponseSeconds = (avgResponseMs / 1000).toFixed(1);
 
   return {
     dueNow,
+    dueLaterToday,
+    dueTomorrow,
+    dueNext7Days,
     streakDays,
     avgResponseSeconds,
     totalReviews,
+    masteredCount,
+    shakyCount,
+    newCount,
     masteredPct,
     shakyPct,
     newPct,
   };
 }
 
-async function calculateStreakDays(todayStart: Date): Promise<number> {
+async function calculateStreakDays(
+  todayStart: Date,
+  userId: string,
+): Promise<number> {
   const recentReviews = await prisma.review.findMany({
     select: {
       answeredAt: true,
@@ -165,6 +287,11 @@ async function calculateStreakDays(todayStart: Date): Promise<number> {
     where: {
       answeredAt: {
         gte: new Date(todayStart.getTime() - 60 * 24 * 60 * 60 * 1000),
+      },
+      card: {
+        deck: {
+          userId,
+        },
       },
     },
     orderBy: {

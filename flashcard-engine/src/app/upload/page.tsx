@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
+import { apiFetch } from "@/lib/api-access";
 
 type ApiErrorPayload = {
   message?: string;
@@ -67,7 +68,7 @@ export default function UploadPage() {
     setResult(null);
 
     try {
-      const response = await fetch("/api/decks", {
+      const response = await apiFetch("/api/decks", {
         method: "POST",
         body: formData,
       });

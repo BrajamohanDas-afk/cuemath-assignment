@@ -36,6 +36,9 @@ export default async function DecksPage() {
           decks={decks.map((deck) => ({
             ...deck,
             updatedAt: deck.updatedAt.toISOString(),
+            lastReviewAt: deck.lastReviewAt?.toISOString() ?? null,
+            oldestOverdueAt: deck.oldestOverdueAt?.toISOString() ?? null,
+            nextUpcomingDueAt: deck.nextUpcomingDueAt?.toISOString() ?? null,
           }))}
         />
       )}

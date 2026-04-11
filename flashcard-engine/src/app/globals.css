@@ -2,7 +2,6 @@
 
 :root {
   --bg-base: #f3efe7;
-  --bg-wash: #e7ddcd;
   --ink: #13151a;
   --ink-dim: #4a4f59;
   --line: rgba(19, 21, 26, 0.18);
@@ -18,10 +17,7 @@
 }
 
 body {
-  background:
-    radial-gradient(circle at 15% 18%, rgba(181, 72, 34, 0.12), transparent 34%),
-    radial-gradient(circle at 82% 14%, rgba(19, 21, 26, 0.08), transparent 32%),
-    linear-gradient(180deg, var(--bg-base), var(--bg-wash));
+  background: var(--bg-base);
   color: var(--ink);
   font-family: var(--font-display), "Space Grotesk", sans-serif;
   min-height: 100%;
@@ -30,26 +26,6 @@ body {
 a {
   color: inherit;
   text-decoration: none;
-}
-
-.app-bg {
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background-image:
-    linear-gradient(
-      to right,
-      rgba(19, 21, 26, 0.03) 1px,
-      transparent 1px
-    ),
-    linear-gradient(
-      to bottom,
-      rgba(19, 21, 26, 0.03) 1px,
-      transparent 1px
-    );
-  background-size: 42px 42px;
-  mask-image: linear-gradient(to bottom, black 0%, black 55%, transparent 100%);
-  z-index: -1;
 }
 
 .site-header {

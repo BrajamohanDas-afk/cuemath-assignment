@@ -91,25 +91,39 @@ export function parseExplainAnswerInput(raw: unknown): ExplainAnswerInput {
 
 export async function getReviewQueue(
   deckId: string,
+  userId: string,
   options?: { excludeCardId?: string },
 ): Promise<ReviewQueueDto> {
+  const deck = await prisma.deck.findFirst({
+    where: { id: deckId, userId },
+    select: { id: true },
+  });
+  if (!deck) {
+    throw new ReviewServiceError("Deck not found for selected user.", 404);
+  }
+
   const now = new Date();
 
   const [totalCardCount, dueCount] = await Promise.all([
     prisma.card.count({
-      where: { deckId },
+      where: { deckId, deck: { userId } },
     }),
     prisma.cardSchedule.count({
       where: {
         dueAt: { lte: now },
-        card: { deckId },
+        card: { deckId, deck: { userId } },
       },
     }),
   ]);
 
-  let nextCardRecord = await findNextDueCard(deckId, now, options?.excludeCardId);
+  let nextCardRecord = await findNextDueCard(
+    deckId,
+    userId,
+    now,
+    options?.excludeCardId,
+  );
   if (!nextCardRecord && options?.excludeCardId) {
-    nextCardRecord = await findNextDueCard(deckId, now);
+    nextCardRecord = await findNextDueCard(deckId, userId, now);
   }
 
   return {
@@ -119,10 +133,16 @@ export async function getReviewQueue(
   };
 }
 
-async function findNextDueCard(deckId: string, now: Date, excludeCardId?: string) {
+async function findNextDueCard(
+  deckId: string,
+  userId: string,
+  now: Date,
+  excludeCardId?: string,
+) {
   return prisma.card.findFirst({
     where: {
       deckId,
+      deck: { userId },
       ...(excludeCardId ? { id: { not: excludeCardId } } : {}),
       schedule: {
         dueAt: { lte: now },
@@ -149,15 +169,23 @@ async function findNextDueCard(deckId: string, now: Date, excludeCardId?: string
 
 export async function submitReviewRating(
   input: SubmitReviewInput,
+  userId: string,
 ): Promise<SubmitReviewResult> {
   const now = new Date();
 
   const card = await prisma.card.findUnique({
     where: { id: input.cardId },
-    include: { schedule: true },
+    include: {
+      schedule: true,
+      deck: {
+        select: {
+          userId: true,
+        },
+      },
+    },
   });
 
-  if (!card || card.deckId !== input.deckId) {
+  if (!card || card.deckId !== input.deckId || card.deck.userId !== userId) {
     throw new ReviewServiceError("Card not found for selected deck.", 404);
   }
 
@@ -179,8 +207,8 @@ export async function submitReviewRating(
 
   const sessionId = await prisma.$transaction(async (tx) => {
     const ensuredSessionId = input.sessionId
-      ? await ensureSession(tx, input.sessionId, input.deckId)
-      : await createSession(tx, input.deckId);
+      ? await ensureSession(tx, input.sessionId, input.deckId, userId)
+      : await createSession(tx, input.deckId, userId);
 
     await tx.cardSchedule.update({
       where: {
@@ -208,21 +236,25 @@ export async function submitReviewRating(
       },
     });
 
-    await tx.deck.update({
+    const updatedDeck = await tx.deck.updateMany({
       where: {
         id: input.deckId,
+        userId,
       },
       data: {
         lastReviewAt: now,
       },
     });
+    if (updatedDeck.count === 0) {
+      throw new ReviewServiceError("Deck not found for selected user.", 404);
+    }
 
     await updateSessionStats(tx, ensuredSessionId, input.rating, input.responseTimeMs);
 
     return ensuredSessionId;
   });
 
-  const queue = await getReviewQueue(input.deckId);
+  const queue = await getReviewQueue(input.deckId, userId);
   return {
     sessionId,
     queue,
@@ -231,6 +263,7 @@ export async function submitReviewRating(
 
 export async function explainCardAnswer(
   input: ExplainAnswerInput,
+  userId: string,
 ): Promise<ExplainAnswerResult> {
   const card = await prisma.card.findUnique({
     where: { id: input.cardId },
@@ -241,6 +274,7 @@ export async function explainCardAnswer(
       back: true,
       deck: {
         select: {
+          userId: true,
           title: true,
           sourceText: true,
         },
@@ -248,7 +282,7 @@ export async function explainCardAnswer(
     },
   });
 
-  if (!card || card.deckId !== input.deckId) {
+  if (!card || card.deckId !== input.deckId || card.deck.userId !== userId) {
     throw new ReviewServiceError("Card not found for selected deck.", 404);
   }
 
@@ -270,7 +304,16 @@ export async function explainCardAnswer(
 async function createSession(
   tx: Prisma.TransactionClient,
   deckId: string,
+  userId: string,
 ): Promise<string> {
+  const deck = await tx.deck.findFirst({
+    where: { id: deckId, userId },
+    select: { id: true },
+  });
+  if (!deck) {
+    throw new ReviewServiceError("Deck not found for selected user.", 404);
+  }
+
   const session = await tx.session.create({
     data: {
       deckId,
@@ -287,14 +330,27 @@ async function ensureSession(
   tx: Prisma.TransactionClient,
   sessionId: string,
   deckId: string,
+  userId: string,
 ): Promise<string> {
   const existing = await tx.session.findUnique({
     where: { id: sessionId },
-    select: { id: true, deckId: true, endedAt: true },
+    select: {
+      id: true,
+      deckId: true,
+      endedAt: true,
+      deck: {
+        select: { userId: true },
+      },
+    },
   });
 
-  if (!existing || existing.deckId !== deckId || existing.endedAt) {
-    return createSession(tx, deckId);
+  if (
+    !existing ||
+    existing.deckId !== deckId ||
+    existing.endedAt ||
+    existing.deck.userId !== userId
+  ) {
+    return createSession(tx, deckId, userId);
   }
 
   return existing.id;

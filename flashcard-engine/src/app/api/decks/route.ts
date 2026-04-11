@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { Prisma } from "@prisma/client";
 import { z } from "zod";
+import { ApiAuthError, resolveApiUserId } from "@/lib/auth-user";
 import { enforceApiRateLimit } from "@/lib/api-rate-limit";
 import {
   DeckServiceError,
@@ -10,25 +10,65 @@ import {
 import { prisma } from "@/lib/prisma";
 
 export const runtime = "nodejs";
+const MAX_UPLOAD_REQUEST_BYTES = 12 * 1024 * 1024;
 
 const deleteSchema = z.object({
   deckId: z.string().min(1),
 });
 
 export async function GET(request: NextRequest) {
-  const rateLimitResponse = enforceApiRateLimit(request);
+  const rateLimitResponse = enforceApiRateLimit(request, { bucket: "read" });
   if (rateLimitResponse) {
     return rateLimitResponse;
   }
 
-  const decks = await listDeckSummaries();
+  let userId: string;
+  try {
+    userId = await resolveApiUserId(request);
+  } catch (error) {
+    if (error instanceof ApiAuthError) {
+      return NextResponse.json(
+        { message: error.message },
+        { status: error.statusCode },
+      );
+    }
+    return NextResponse.json({ message: "Unauthorized." }, { status: 401 });
+  }
+
+  const view = request.nextUrl.searchParams.get("view");
+  const includeTiming = view !== "review";
+  const decks = await listDeckSummaries({ includeTiming, userId });
   return NextResponse.json({ decks });
 }
 
 export async function POST(request: NextRequest) {
-  const rateLimitResponse = enforceApiRateLimit(request);
+  const rateLimitResponse = enforceApiRateLimit(request, { bucket: "ingest" });
   if (rateLimitResponse) {
     return rateLimitResponse;
+  }
+
+  let userId: string;
+  try {
+    userId = await resolveApiUserId(request);
+  } catch (error) {
+    if (error instanceof ApiAuthError) {
+      return NextResponse.json(
+        { message: error.message },
+        { status: error.statusCode },
+      );
+    }
+    return NextResponse.json({ message: "Unauthorized." }, { status: 401 });
+  }
+
+  const contentLengthHeader = request.headers.get("content-length");
+  if (contentLengthHeader) {
+    const contentLength = Number(contentLengthHeader);
+    if (Number.isFinite(contentLength) && contentLength > MAX_UPLOAD_REQUEST_BYTES) {
+      return NextResponse.json(
+        { message: "Upload request is too large." },
+        { status: 413 },
+      );
+    }
   }
 
   const formData = await request.formData();
@@ -47,6 +87,7 @@ export async function POST(request: NextRequest) {
   try {
     const deck = await ingestPdfToDeck({
       file,
+      userId,
       deckTitle: typeof deckTitle === "string" ? deckTitle : undefined,
       cardCountPreset:
         typeof cardCountPreset === "string"
@@ -78,9 +119,24 @@ export async function POST(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
-  const rateLimitResponse = enforceApiRateLimit(request);
+  const rateLimitResponse = enforceApiRateLimit(request, {
+    bucket: "mutation",
+  });
   if (rateLimitResponse) {
     return rateLimitResponse;
+  }
+
+  let userId: string;
+  try {
+    userId = await resolveApiUserId(request);
+  } catch (error) {
+    if (error instanceof ApiAuthError) {
+      return NextResponse.json(
+        { message: error.message },
+        { status: error.statusCode },
+      );
+    }
+    return NextResponse.json({ message: "Unauthorized." }, { status: 401 });
   }
 
   try {
@@ -93,24 +149,21 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    await prisma.deck.delete({
+    const result = await prisma.deck.deleteMany({
       where: {
         id: parsed.data.deckId,
+        userId,
       },
     });
+    if (result.count === 0) {
+      return NextResponse.json({ message: "Deck not found." }, { status: 404 });
+    }
 
     return NextResponse.json({
       message: "Deck deleted.",
       deckId: parsed.data.deckId,
     });
-  } catch (error) {
-    if (
-      error instanceof Prisma.PrismaClientKnownRequestError &&
-      error.code === "P2025"
-    ) {
-      return NextResponse.json({ message: "Deck not found." }, { status: 404 });
-    }
-
+  } catch {
     return NextResponse.json(
       { message: "Unexpected server error during deck deletion." },
       { status: 500 },

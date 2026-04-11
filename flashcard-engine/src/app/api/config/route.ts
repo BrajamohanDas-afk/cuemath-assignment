@@ -3,7 +3,7 @@ import { enforceApiRateLimit } from "@/lib/api-rate-limit";
 import { getSafeRuntimeConfig } from "@/lib/env";
 
 export async function GET(request: NextRequest) {
-  const rateLimitResponse = enforceApiRateLimit(request);
+  const rateLimitResponse = enforceApiRateLimit(request, { bucket: "read" });
   if (rateLimitResponse) {
     return rateLimitResponse;
   }

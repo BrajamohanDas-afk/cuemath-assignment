@@ -60,6 +60,12 @@ npm run prisma:generate
 npm run prisma:push
 ```
 
+If you are applying the user-ownership migration path, use:
+
+```bash
+npm run prisma:migrate
+```
+
 5. Run development server:
 
 ```bash
@@ -82,3 +88,18 @@ Open `http://localhost:3000`.
 
 - Keep `OPENAI_API_KEY` only in server-side env variables.
 - Never expose keys in client code or commit secrets to git.
+- Optional API gate: set `APP_API_TOKEN` to require `x-api-token` (or `app_api_token` cookie) on `/api/decks` and `/api/review`.
+- Optional privacy toggle: set `ALLOW_EXTERNAL_LLM=false` to force fallback-only generation/explanations.
+- When `APP_API_TOKEN` is enabled, save the token once from the home page prompt so browser UI requests include the auth header.
+
+## User Ownership
+
+- `Deck` now belongs to a `User` via `Deck.userId`.
+- API and review flows enforce user ownership checks for deck/card/session access.
+- Prisma migration is included at `prisma/migrations/20260411_add_user_ownership/migration.sql`.
+
+## Release verification
+
+- Run `npm run lint`
+- Run `npm run build`
+- Run manual checklist in `tests/REGRESSION_CHECKLIST.md`
