@@ -12,5 +12,8 @@ export function sanitizeNextPath(value: string | null | undefined): string {
 }
 
 export function resolveBaseUrl(request: NextRequest, env: AppEnv): string {
+  if (env.NODE_ENV !== "production") {
+    return request.nextUrl.origin;
+  }
   return env.APP_BASE_URL ?? request.nextUrl.origin;
 }

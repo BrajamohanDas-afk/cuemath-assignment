@@ -57,7 +57,7 @@ export interface ExplainAnswerInput {
 export interface ExplainAnswerResult {
   explanation: string;
   evidence: string[];
-  provider: "openai" | "fallback";
+  provider: "gemini" | "fallback";
   warning: string | null;
 }
 

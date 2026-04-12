@@ -23,6 +23,37 @@ const aiResponseSchema = z.object({
   cards: z.array(aiCardSchema).min(1).max(24),
 });
 
+const GEMINI_RESPONSE_SCHEMA = {
+  type: "OBJECT",
+  required: ["cards"],
+  properties: {
+    cards: {
+      type: "ARRAY",
+      minItems: 1,
+      maxItems: 24,
+      items: {
+        type: "OBJECT",
+        required: ["type", "front", "back"],
+        properties: {
+          type: {
+            type: "STRING",
+            enum: [...SUPPORTED_CARD_TYPES],
+          },
+          front: { type: "STRING" },
+          back: { type: "STRING" },
+          difficulty: { type: "INTEGER", minimum: 1, maximum: 5 },
+          tags: {
+            type: "ARRAY",
+            maxItems: 6,
+            items: { type: "STRING" },
+          },
+        },
+      },
+    },
+  },
+} as const;
+const GEMINI_LOG_PREFIX = "[gemini:flashcard-generation]";
+
 export interface GeneratedFlashcard {
   type: SupportedCardType;
   front: string;
@@ -34,7 +65,7 @@ export interface GeneratedFlashcard {
 
 export interface GenerationResult {
   cards: GeneratedFlashcard[];
-  provider: "openai";
+  provider: "gemini";
   warning: string | null;
 }
 
@@ -120,14 +151,18 @@ interface GenerationInput {
   difficulty?: GenerationDifficulty;
 }
 
-interface OpenAiChatChoice {
-  message?: {
-    content?: string;
+interface GeminiResponsePart {
+  text?: string;
+}
+
+interface GeminiResponseCandidate {
+  content?: {
+    parts?: GeminiResponsePart[];
   };
 }
 
-interface OpenAiChatResponse {
-  choices?: OpenAiChatChoice[];
+interface GeminiGenerateContentResponse {
+  candidates?: GeminiResponseCandidate[];
 }
 
 type QuestionContext = {
@@ -158,7 +193,7 @@ export async function generateFlashcardsFromText(
   const sourceText = input.sourceText.trim();
   const difficulty = input.difficulty ?? "medium";
 
-  const aiAttempt = await tryOpenAiGeneration({
+  const aiAttempt = await tryGeminiGeneration({
     deckTitle: input.deckTitle,
     sourceText,
     maxCards,
@@ -168,7 +203,7 @@ export async function generateFlashcardsFromText(
   return aiAttempt;
 }
 
-async function tryOpenAiGeneration(input: {
+async function tryGeminiGeneration(input: {
   deckTitle: string;
   sourceText: string;
   maxCards: number;
@@ -177,25 +212,23 @@ async function tryOpenAiGeneration(input: {
   const modelReadySource = buildModelReadySource(input.sourceText);
   const sourceChunks = splitSourceIntoChunks(modelReadySource, {
     maxChars: 5_500,
-    maxChunks: 3,
+    maxChunks: 2,
   });
-  const chunkBudgets = distributeCardBudget(input.maxCards + 6, sourceChunks.length);
-  const results = await mapWithConcurrency(
-    sourceChunks.map((sourceText, chunkIndex) => ({
-      sourceText,
-      chunkIndex,
+  const chunkBudgets = distributeCardBudget(input.maxCards + 3, sourceChunks.length);
+  const results: GenerationResult[] = [];
+  for (let chunkIndex = 0; chunkIndex < sourceChunks.length; chunkIndex += 1) {
+    const result = await tryGeminiGenerationForChunk({
+      deckTitle: input.deckTitle,
+      sourceText: sourceChunks[chunkIndex] ?? "",
       maxCards: chunkBudgets[chunkIndex] ?? input.maxCards,
-    })),
-    1,
-    async (item) =>
-      tryOpenAiGenerationForChunk({
-        deckTitle: input.deckTitle,
-        sourceText: item.sourceText ?? "",
-        maxCards: item.maxCards,
-        difficulty: input.difficulty,
-        chunkLabel: `Chunk ${item.chunkIndex + 1} / ${sourceChunks.length}`,
-      }),
-  );
+      difficulty: input.difficulty,
+      chunkLabel: `Chunk ${chunkIndex + 1} / ${sourceChunks.length}`,
+    });
+    results.push(result);
+    if (isRateLimitWarning(result.warning)) {
+      break;
+    }
+  }
 
   const collectedCards = results.flatMap((result) => result.cards);
   const warnings = summarizeWarnings(
@@ -205,34 +238,37 @@ async function tryOpenAiGeneration(input: {
   );
 
   if (collectedCards.length > 0) {
-    const normalizedCards = normalizeCards(collectedCards, input.maxCards);
+    const normalizedCards = prioritizeCoverageAndQuality(
+      collectedCards,
+      input.maxCards,
+    );
     if (normalizedCards.length > 0) {
       return {
         cards: normalizedCards,
-        provider: "openai",
+        provider: "gemini",
         warning: warnings || null,
       };
     }
 
     return {
       cards: [],
-      provider: "openai",
+      provider: "gemini",
       warning:
         warnings ||
-        "OpenAI generated content, but no card passed quality validation. Try another PDF or reduce card count.",
+        "Gemini generated content, but no card passed quality validation. Try another PDF or reduce card count.",
     };
   }
 
   return {
     cards: [],
-    provider: "openai",
+    provider: "gemini",
     warning:
       warnings ||
-      "OpenAI generation produced no usable cards.",
+      "Gemini generation produced no usable cards.",
   };
 }
 
-async function tryOpenAiGenerationForChunk(input: {
+async function tryGeminiGenerationForChunk(input: {
   deckTitle: string;
   sourceText: string;
   maxCards: number;
@@ -240,46 +276,92 @@ async function tryOpenAiGenerationForChunk(input: {
   chunkLabel: string;
 }): Promise<GenerationResult> {
   const env = getEnv();
-  if (!env.OPENAI_API_KEY || !env.ALLOW_EXTERNAL_LLM) {
+  if (!env.GEMINI_API_KEY || !env.ALLOW_EXTERNAL_LLM) {
     return {
       cards: [],
-      provider: "openai",
+      provider: "gemini",
       warning:
-        "OpenAI is required for card generation but is not configured (missing OPENAI_API_KEY or ALLOW_EXTERNAL_LLM=false).",
+        "Gemini is required for card generation but is not configured (missing GEMINI_API_KEY or ALLOW_EXTERNAL_LLM=false).",
     };
   }
 
-  const timeoutMs = 22_000;
-  const maxAttempts = 3;
+  const timeoutMs = 45_000;
+  const maxAttempts = 2;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const attemptMaxCards =
+      attempt === 1 ? input.maxCards : Math.max(6, Math.floor(input.maxCards * 0.7));
+    const attemptSourceText =
+      attempt === 1 ? input.sourceText : input.sourceText.slice(0, 3_800);
+    const maxOutputTokens = clamp(attemptMaxCards * 260, 2_048, 8_192);
+
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      console.info(
+        `${GEMINI_LOG_PREFIX} request`,
+        JSON.stringify({
+          chunk: input.chunkLabel,
+          attempt,
+          maxAttempts,
+          model: env.GEMINI_MODEL,
+          maxCards: attemptMaxCards,
+          difficulty: input.difficulty,
+          sourceChars: attemptSourceText.length,
+          maxOutputTokens,
+        }),
+      );
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(env.GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`,
+        {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${env.OPENAI_API_KEY}`,
         },
         signal: controller.signal,
         body: JSON.stringify({
-          model: env.OPENAI_MODEL,
-          temperature: 0.3,
-          response_format: { type: "json_object" },
-          messages: [
-            {
-              role: "system",
-              content:
-                "You generate high-quality study flashcards. Return only valid JSON.",
-            },
+          contents: [
             {
               role: "user",
-              content: buildPrompt(input),
+              parts: [
+                {
+                  text: buildPrompt({
+                    ...input,
+                    sourceText: attemptSourceText,
+                    maxCards: attemptMaxCards,
+                  }),
+                },
+              ],
             },
           ],
+          systemInstruction: {
+            parts: [
+              {
+                text: "You generate high-quality study flashcards. Return only valid JSON.",
+              },
+            ],
+          },
+          generationConfig: {
+            temperature: 0.3,
+            responseMimeType: "application/json",
+            maxOutputTokens,
+            responseSchema: GEMINI_RESPONSE_SCHEMA,
+          },
         }),
-      });
+        },
+      );
+      console.info(
+        `${GEMINI_LOG_PREFIX} response`,
+        JSON.stringify({
+          chunk: input.chunkLabel,
+          attempt,
+          status: response.status,
+          requestId:
+            response.headers.get("x-request-id") ??
+            response.headers.get("x-goog-request-id"),
+          retryAfter: response.headers.get("retry-after"),
+        }),
+      );
 
       if (response.status === 429 && attempt < maxAttempts) {
         const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
@@ -293,39 +375,134 @@ async function tryOpenAiGenerationForChunk(input: {
       }
 
       if (!response.ok) {
+        const errorDetails = await extractGeminiErrorDetails(response);
+        console.error(
+          `${GEMINI_LOG_PREFIX} error`,
+          JSON.stringify({
+            chunk: input.chunkLabel,
+            attempt,
+            status: response.status,
+            message: errorDetails.message || null,
+            body: errorDetails.body || null,
+          }),
+        );
+        if (response.status === 429) {
+          const suffix = errorDetails.message ? ` ${errorDetails.message}` : "";
+          return {
+            cards: [],
+            provider: "gemini",
+            warning:
+              `Gemini rate limit/quota reached (429). Wait 30-60 seconds and retry, or increase your Gemini project limits.${suffix}`.trim(),
+          };
+        }
         return {
           cards: [],
-          provider: "openai",
-          warning: `OpenAI request failed with status ${response.status}.`,
+          provider: "gemini",
+          warning: `Gemini request failed with status ${response.status}.${errorDetails.message ? ` ${errorDetails.message}` : ""}`.trim(),
         };
       }
 
-      const payload = (await response.json()) as OpenAiChatResponse;
-      const rawContent = payload.choices?.[0]?.message?.content?.trim();
+      const payload = (await response.json()) as GeminiGenerateContentResponse;
+      const rawContent = payload.candidates?.[0]?.content?.parts
+        ?.map((part) => part.text ?? "")
+        .join("")
+        .trim();
+      console.info(
+        `${GEMINI_LOG_PREFIX} parsed`,
+        JSON.stringify({
+          chunk: input.chunkLabel,
+          attempt,
+          choices: payload.candidates?.length ?? 0,
+          contentLength: rawContent?.length ?? 0,
+          contentPreview: rawContent ? trimForCard(rawContent, 180) : null,
+        }),
+      );
 
       if (!rawContent) {
         return {
           cards: [],
-          provider: "openai",
-          warning: "OpenAI returned empty content.",
+          provider: "gemini",
+          warning: "Gemini returned empty content.",
         };
       }
 
-      const parsed = aiResponseSchema.safeParse(parseJsonContent(rawContent));
+      const parsed = aiResponseSchema.safeParse(parseJsonContentWithRepair(rawContent));
       if (!parsed.success) {
         return {
           cards: [],
-          provider: "openai",
-          warning: "OpenAI returned invalid JSON schema.",
+          provider: "gemini",
+          warning: "Gemini returned invalid JSON schema.",
+        };
+      }
+
+      const strictCards = normalizeCards(parsed.data.cards, attemptMaxCards, 55);
+      if (strictCards.length > 0) {
+        return {
+          cards: strictCards,
+          provider: "gemini",
+          warning: null,
+        };
+      }
+
+      const relaxedCards = normalizeCards(parsed.data.cards, attemptMaxCards, 45);
+      if (relaxedCards.length > 0) {
+        console.warn(
+          `${GEMINI_LOG_PREFIX} quality`,
+          JSON.stringify({
+            chunk: input.chunkLabel,
+            attempt,
+            parsedCards: parsed.data.cards.length,
+            strictCards: strictCards.length,
+            relaxedCards: relaxedCards.length,
+          }),
+        );
+        return {
+          cards: relaxedCards,
+          provider: "gemini",
+          warning:
+            "Gemini response required relaxed quality filtering to produce usable cards.",
+        };
+      }
+
+      const rescuedCards = rescueCardsFromModelOutput(
+        parsed.data.cards,
+        attemptMaxCards,
+      );
+      if (rescuedCards.length > 0) {
+        console.warn(
+          `${GEMINI_LOG_PREFIX} quality`,
+          JSON.stringify({
+            chunk: input.chunkLabel,
+            attempt,
+            parsedCards: parsed.data.cards.length,
+            strictCards: strictCards.length,
+            relaxedCards: relaxedCards.length,
+            rescuedCards: rescuedCards.length,
+          }),
+        );
+        return {
+          cards: rescuedCards,
+          provider: "gemini",
+          warning:
+            "Gemini response required rescue normalization because strict quality checks filtered all cards.",
         };
       }
 
       return {
-        cards: normalizeCards(parsed.data.cards, input.maxCards),
-        provider: "openai",
-        warning: null,
+        cards: [],
+        provider: "gemini",
+        warning: "Gemini returned cards but none passed quality validation.",
       };
     } catch (error) {
+      console.error(
+        `${GEMINI_LOG_PREFIX} exception`,
+        JSON.stringify({
+          chunk: input.chunkLabel,
+          attempt,
+          type: error instanceof Error ? error.name : "UnknownError",
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      );
       if (isAbortError(error) && attempt < maxAttempts) {
         await sleep(getBackoffMs(attempt));
         continue;
@@ -338,15 +515,15 @@ async function tryOpenAiGenerationForChunk(input: {
       if (isAbortError(error)) {
         return {
           cards: [],
-          provider: "openai",
-          warning: `OpenAI request timed out after ${timeoutMs / 1000} seconds.`,
+          provider: "gemini",
+          warning: `Gemini request timed out after ${timeoutMs / 1000} seconds.`,
         };
       }
 
       return {
         cards: [],
-        provider: "openai",
-        warning: "OpenAI request error.",
+        provider: "gemini",
+        warning: "Gemini request error.",
       };
     } finally {
       clearTimeout(timeoutId);
@@ -355,8 +532,8 @@ async function tryOpenAiGenerationForChunk(input: {
 
   return {
     cards: [],
-    provider: "openai",
-    warning: "OpenAI request failed after multiple retries.",
+    provider: "gemini",
+    warning: "Gemini request failed after multiple retries.",
   };
 }
 
@@ -470,6 +647,7 @@ function normalizeCards(
     tags?: string[];
   }>,
   maxCards: number,
+  minQualityScore = 55,
 ): GeneratedFlashcard[] {
   const seen = new Set<string>();
   const normalized: GeneratedFlashcard[] = [];
@@ -504,7 +682,7 @@ function normalizeCards(
     seen.add(dedupeKey);
 
     const qualityScore = estimateCardQuality(front, back, card.type);
-    if (qualityScore < 55) {
+    if (qualityScore < minQualityScore) {
       continue;
     }
 
@@ -519,6 +697,55 @@ function normalizeCards(
   }
 
   return prioritizeCoverageAndQuality(normalized, maxCards);
+}
+
+function rescueCardsFromModelOutput(
+  cards: Array<{
+    type: SupportedCardType;
+    front: string;
+    back: string;
+    difficulty?: number;
+    tags?: string[];
+  }>,
+  maxCards: number,
+): GeneratedFlashcard[] {
+  const seen = new Set<string>();
+  const rescued: GeneratedFlashcard[] = [];
+
+  for (const card of cards) {
+    const front = normalizeFrontText(card.front);
+    const back = normalizeBackText(card.back);
+    const minBackLength = card.type === CardType.CLOZE ? 4 : 10;
+
+    if (front.length < 8 || back.length < minBackLength) {
+      continue;
+    }
+    if (isLowQualityFront(front)) {
+      continue;
+    }
+
+    const dedupeKey = `${front.toLowerCase()}|${back.toLowerCase()}`;
+    if (seen.has(dedupeKey)) {
+      continue;
+    }
+    seen.add(dedupeKey);
+
+    const qualityScore = estimateCardQuality(front, back, card.type);
+    rescued.push({
+      type: card.type,
+      front,
+      back,
+      difficulty: clamp(card.difficulty ?? 2, 1, 5),
+      tags: sanitizeTags([
+        ...(card.tags ?? []),
+        `quality:${qualityScore}`,
+        "quality:rescued",
+      ]),
+      qualityScore,
+    });
+  }
+
+  return prioritizeCoverageAndQuality(rescued, maxCards);
 }
 
 export function estimateCardQuality(
@@ -610,16 +837,83 @@ function prioritizeCoverageAndQuality(
   return selected.slice(0, maxCards);
 }
 
-function parseJsonContent(content: string): unknown {
-  const trimmed = content.trim();
-  if (trimmed.startsWith("```")) {
-    const withoutFence = trimmed
-      .replace(/^```(?:json)?/i, "")
-      .replace(/```$/i, "")
-      .trim();
-    return JSON.parse(withoutFence);
+function parseJsonContentWithRepair(content: string): unknown {
+  const parseAttempt = (value: string): unknown => {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("```")) {
+      const withoutFence = trimmed
+        .replace(/^```(?:json)?/i, "")
+        .replace(/```$/i, "")
+        .trim();
+      return JSON.parse(withoutFence);
+    }
+    return JSON.parse(trimmed);
+  };
+
+  try {
+    return parseAttempt(content);
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) {
+      throw error;
+    }
+    const repaired = repairPossiblyTruncatedJson(content);
+    return parseAttempt(repaired);
   }
-  return JSON.parse(trimmed);
+}
+
+function repairPossiblyTruncatedJson(content: string): string {
+  const raw = content.trim();
+  const stripped = raw.startsWith("```")
+    ? raw.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim()
+    : raw;
+
+  let output = stripped;
+  let inString = false;
+  let escaped = false;
+  let openBraces = 0;
+  let openBrackets = 0;
+
+  for (const ch of stripped) {
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (ch === "{") {
+      openBraces += 1;
+    } else if (ch === "}" && openBraces > 0) {
+      openBraces -= 1;
+    } else if (ch === "[") {
+      openBrackets += 1;
+    } else if (ch === "]" && openBrackets > 0) {
+      openBrackets -= 1;
+    }
+  }
+
+  if (inString) {
+    output += "\"";
+  }
+  if (/:\s*$/.test(output)) {
+    output += "\"\"";
+  }
+
+  output = output.replace(/,\s*$/g, "");
+  output += "]".repeat(openBrackets);
+  output += "}".repeat(openBraces);
+  output = output.replace(/,\s*([}\]])/g, "$1");
+
+  return output;
 }
 
 function sanitizeTags(tags: string[]): string[] {
@@ -1435,29 +1729,45 @@ function summarizeWarnings(warnings: string[]): string | null {
     .join(" ");
 }
 
+function isRateLimitWarning(warning: string | null): boolean {
+  if (!warning) {
+    return false;
+  }
+  return /rate limit|quota|429/i.test(warning);
+}
+
+async function extractGeminiErrorDetails(response: Response): Promise<{
+  message: string;
+  body: string;
+}> {
+  try {
+    const rawBody = (await response.text()).trim();
+    let parsedMessage = "";
+    if (rawBody) {
+      try {
+        const payload = JSON.parse(rawBody) as {
+          error?: { message?: string };
+        };
+        parsedMessage = payload.error?.message?.trim() ?? "";
+      } catch {
+        parsedMessage = "";
+      }
+    }
+
+    return {
+      message: parsedMessage ? `Details: ${trimForCard(parsedMessage, 180)}` : "",
+      body: rawBody ? trimForCard(rawBody.replace(/\s+/g, " "), 320) : "",
+    };
+  } catch {
+    return {
+      message: "",
+      body: "",
+    };
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
-}
-
-async function mapWithConcurrency<TInput, TOutput>(
-  items: TInput[],
-  concurrency: number,
-  mapper: (item: TInput) => Promise<TOutput>,
-): Promise<TOutput[]> {
-  const safeConcurrency = Math.max(1, Math.min(concurrency, items.length || 1));
-  const results = new Array<TOutput>(items.length);
-  let cursor = 0;
-
-  async function worker() {
-    while (cursor < items.length) {
-      const index = cursor;
-      cursor += 1;
-      results[index] = await mapper(items[index] as TInput);
-    }
-  }
-
-  await Promise.all(Array.from({ length: safeConcurrency }, () => worker()));
-  return results;
 }

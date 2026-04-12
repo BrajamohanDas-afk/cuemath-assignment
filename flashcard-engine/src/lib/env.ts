@@ -29,8 +29,8 @@ const envSchema = z.object({
     .enum(["development", "test", "production"])
     .default("development"),
   DATABASE_URL: z.string().min(1),
-  OPENAI_API_KEY: optionalTrimmedString(),
-  OPENAI_MODEL: z.string().min(1).default("gpt-4o-mini"),
+  GEMINI_API_KEY: optionalTrimmedString(),
+  GEMINI_MODEL: z.string().min(1).default("gemini-2.0-flash"),
   ALLOW_EXTERNAL_LLM: z
     .enum(["true", "false"])
     .default("true")
@@ -63,8 +63,8 @@ export function getEnv(): AppEnv {
   const parsed = envSchema.safeParse({
     NODE_ENV: process.env.NODE_ENV,
     DATABASE_URL: process.env.DATABASE_URL,
-    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-    OPENAI_MODEL: process.env.OPENAI_MODEL,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    GEMINI_MODEL: process.env.GEMINI_MODEL,
     ALLOW_EXTERNAL_LLM: process.env.ALLOW_EXTERNAL_LLM,
     APP_API_TOKEN: process.env.APP_API_TOKEN,
     GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,

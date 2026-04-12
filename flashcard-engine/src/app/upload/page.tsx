@@ -19,7 +19,7 @@ type DeckResult = {
   title: string;
   sourceFile: string;
   cardCount: number;
-  provider: "openai";
+  provider: "gemini";
   warning: string | null;
   sampleCards: GeneratedCardPreview[];
 };
@@ -229,7 +229,7 @@ export default function UploadPage() {
                 Created &quot;{result.title}&quot; with {result.cardCount} cards.
               </p>
               <p className="text-xs text-[var(--ink-dim)]">
-                Generator: OpenAI
+                Generator: Gemini
                 {result.warning ? ` - ${result.warning}` : ""}
               </p>
               <div className="space-y-3">
@@ -255,7 +255,7 @@ export default function UploadPage() {
             <li>PDF only, one file per deck</li>
             <li>Max upload size: 10 MB</li>
             <li>Cards are saved to DB immediately after generation</li>
-            <li>OpenAI key is required for card generation</li>
+            <li>Gemini key is required for card generation</li>
           </ul>
         </aside>
       </div>

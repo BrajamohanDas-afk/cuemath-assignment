@@ -6,14 +6,18 @@ const explanationSchema = z.object({
   evidence: z.array(z.string().min(8).max(700)).min(1).max(5),
 });
 
-interface OpenAiChatChoice {
-  message?: {
-    content?: string;
+interface GeminiResponsePart {
+  text?: string;
+}
+
+interface GeminiResponseCandidate {
+  content?: {
+    parts?: GeminiResponsePart[];
   };
 }
 
-interface OpenAiChatResponse {
-  choices?: OpenAiChatChoice[];
+interface GeminiGenerateContentResponse {
+  candidates?: GeminiResponseCandidate[];
 }
 
 export interface ExplainAnswerInput {
@@ -26,7 +30,7 @@ export interface ExplainAnswerInput {
 export interface ExplainAnswerResult {
   explanation: string;
   evidence: string[];
-  provider: "openai" | "fallback";
+  provider: "gemini" | "fallback";
   warning: string | null;
   source: "uploaded_pdf";
 }
@@ -47,7 +51,7 @@ export async function explainAnswerFromSource(
     `${compactFront} ${compactAnswer}`,
   );
 
-  const aiResult = await tryOpenAiExplanation({
+  const aiResult = await tryGeminiExplanation({
     ...input,
     sourceText: relevantPassages.join("\n"),
   });
@@ -71,16 +75,16 @@ export async function explainAnswerFromSource(
     evidence: fallbackEvidence,
     provider: "fallback",
     warning:
-      "Used fallback explanation because an OpenAI explanation was unavailable.",
+      "Used fallback explanation because a Gemini explanation was unavailable.",
     source: "uploaded_pdf",
   };
 }
 
-async function tryOpenAiExplanation(
+async function tryGeminiExplanation(
   input: ExplainAnswerInput,
 ): Promise<BaseExplainResult | null> {
   const env = getEnv();
-  if (!env.OPENAI_API_KEY || !env.ALLOW_EXTERNAL_LLM) {
+  if (!env.GEMINI_API_KEY || !env.ALLOW_EXTERNAL_LLM) {
     return null;
   }
 
@@ -89,37 +93,49 @@ async function tryOpenAiExplanation(
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(env.GEMINI_MODEL)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`,
+      {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: env.OPENAI_MODEL,
-        temperature: 0.2,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              "You explain flashcard answers using only the provided source excerpts. Return JSON only.",
-          },
+        contents: [
           {
             role: "user",
-            content: buildExplainPrompt(input),
+            parts: [
+              {
+                text: buildExplainPrompt(input),
+              },
+            ],
           },
         ],
+        systemInstruction: {
+          parts: [
+            {
+              text: "You explain flashcard answers using only the provided source excerpts. Return JSON only.",
+            },
+          ],
+        },
+        generationConfig: {
+          temperature: 0.2,
+          responseMimeType: "application/json",
+        },
       }),
-    });
+      },
+    );
 
     if (!response.ok) {
       return null;
     }
 
-    const payload = (await response.json()) as OpenAiChatResponse;
-    const rawContent = payload.choices?.[0]?.message?.content?.trim();
+    const payload = (await response.json()) as GeminiGenerateContentResponse;
+    const rawContent = payload.candidates?.[0]?.content?.parts
+      ?.map((part) => part.text ?? "")
+      .join("")
+      .trim();
     if (!rawContent) {
       return null;
     }
@@ -132,7 +148,7 @@ async function tryOpenAiExplanation(
     return {
       explanation: sanitizeText(parsed.data.explanation),
       evidence: parsed.data.evidence.map(sanitizeText),
-      provider: "openai",
+      provider: "gemini",
       warning: null,
     };
   } catch {
@@ -246,16 +262,20 @@ function extractCandidatePassages(sourceText: string): string[] {
 
 function compactSnippet(value: string): string {
   const cleaned = sanitizeText(value);
-  if (cleaned.length <= 260) {
+  if (cleaned.length <= 180) {
     return cleaned;
   }
-  return `${cleaned.slice(0, 257).trim()}...`;
+  return `${cleaned.slice(0, 177).trim()}...`;
 }
 
 function isNoisyPassage(value: string): boolean {
   const lowered = value.toLowerCase();
   const words = value.split(/\s+/).filter(Boolean);
   const punctuationCount = (value.match(/[.,;:!?]/g) ?? []).length;
+  const commaCount = (value.match(/,/g) ?? []).length;
+  const hasDenseListPattern =
+    words.length >= 35 &&
+    (commaCount >= 6 || /\b(mean|median|mode|example|testing|design)\b/.test(lowered));
 
   if (/\blecture\s+\d+\b/.test(lowered) && /\bcontent\b/.test(lowered)) {
     return true;
@@ -264,6 +284,9 @@ function isNoisyPassage(value: string): boolean {
     return true;
   }
   if (words.length >= 18 && punctuationCount <= 1) {
+    return true;
+  }
+  if (hasDenseListPattern) {
     return true;
   }
 

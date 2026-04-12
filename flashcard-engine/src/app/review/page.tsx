@@ -44,7 +44,7 @@ type RateResponse = {
 type ExplainResponse = {
   explanation: string;
   evidence: string[];
-  provider: "openai" | "fallback";
+  provider: "gemini" | "fallback";
   warning: string | null;
   source: "uploaded_pdf";
 };

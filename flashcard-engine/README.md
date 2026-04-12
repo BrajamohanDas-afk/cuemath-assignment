@@ -90,9 +90,11 @@ https://<your-domain>/api/auth/google/callback
 
 See `.env.example` for full template.
 
+For the LLM-backed generation flows, set `GEMINI_API_KEY`. `GEMINI_MODEL` defaults to `gemini-2.0-flash`.
+
 - `DATABASE_URL`
-- `OPENAI_API_KEY`
-- `OPENAI_MODEL`
+- `GEMINI_API_KEY`
+- `GEMINI_MODEL`
 - `ALLOW_EXTERNAL_LLM`
 - `APP_API_TOKEN`
 - `GOOGLE_CLIENT_ID`

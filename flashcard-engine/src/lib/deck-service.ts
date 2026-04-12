@@ -145,7 +145,7 @@ export async function ingestPdfToDeck(
   title: string;
   sourceFile: string;
   cardCount: number;
-  provider: "openai";
+  provider: "gemini";
   warning: string | null;
   sampleCards: GeneratedFlashcard[];
 }> {
@@ -201,7 +201,7 @@ export async function ingestPdfToDeck(
   if (generation.cards.length === 0) {
     throw new DeckServiceError(
       generation.warning ??
-        "OpenAI could not generate useful cards from this PDF right now. Please try again.",
+        "Gemini could not generate useful cards from this PDF right now. Please try again.",
       502,
     );
   }
