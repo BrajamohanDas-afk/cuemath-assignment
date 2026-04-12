@@ -72,19 +72,6 @@ export interface DeckSummary {
   status: "Active" | "Steady" | "Calm";
 }
 
-type DeckSummaryRow = {
-  id: string;
-  title: string;
-  sourceFile: string;
-  createdAt: Date | string | number | bigint;
-  updatedAt: Date | string | number | bigint;
-  lastReviewAt: Date | string | number | bigint | null;
-  oldestOverdueAt: Date | string | number | bigint | null;
-  nextUpcomingDueAt: Date | string | number | bigint | null;
-  cardCount: number | bigint | string;
-  dueCount: number | bigint | string;
-};
-
 export async function listDeckSummaries(options?: {
   includeTiming?: boolean;
   userId?: string;
@@ -95,40 +82,56 @@ export async function listDeckSummaries(options?: {
     throw new DeckServiceError("Unauthorized. Sign in to continue.", 401);
   }
   const now = new Date();
-  const rows = await prisma.$queryRaw<DeckSummaryRow[]>`
-    SELECT
-      d.id,
-      d.title,
-      d.sourceFile,
-      d.createdAt,
-      d.updatedAt,
-      d.lastReviewAt,
-      MIN(CASE WHEN ${includeTiming} = 1 AND cs.dueAt <= ${now} THEN cs.dueAt END) AS oldestOverdueAt,
-      MIN(CASE WHEN ${includeTiming} = 1 AND cs.dueAt > ${now} THEN cs.dueAt END) AS nextUpcomingDueAt,
-      COUNT(DISTINCT c.id) AS cardCount,
-      COUNT(CASE WHEN cs.dueAt <= ${now} THEN 1 END) AS dueCount
-    FROM Deck AS d
-    LEFT JOIN Card AS c
-      ON c.deckId = d.id
-    LEFT JOIN CardSchedule AS cs
-      ON cs.cardId = c.id
-    WHERE d.userId = ${userId}
-    GROUP BY d.id, d.title, d.sourceFile, d.createdAt, d.updatedAt, d.lastReviewAt
-    ORDER BY d.updatedAt DESC
-  `;
+  const decks = await prisma.deck.findMany({
+    where: { userId },
+    orderBy: { updatedAt: "desc" },
+    select: {
+      id: true,
+      title: true,
+      sourceFile: true,
+      createdAt: true,
+      updatedAt: true,
+      lastReviewAt: true,
+      cards: {
+        select: {
+          schedule: {
+            select: {
+              dueAt: true,
+            },
+          },
+        },
+      },
+    },
+  });
 
-  return rows.map((row) => {
-    const dueCount = toNumber(row.dueCount);
+  return decks.map((deck) => {
+    const dueDates = deck.cards
+      .map((card) => card.schedule?.dueAt ?? null)
+      .filter((dueAt): dueAt is Date => dueAt instanceof Date);
+
+    const overdueDates = dueDates.filter((dueAt) => dueAt <= now);
+    const upcomingDates = dueDates.filter((dueAt) => dueAt > now);
+
+    const dueCount = overdueDates.length;
+    const oldestOverdueAt =
+      includeTiming && overdueDates.length > 0
+        ? new Date(Math.min(...overdueDates.map((value) => value.getTime())))
+        : null;
+    const nextUpcomingDueAt =
+      includeTiming && upcomingDates.length > 0
+        ? new Date(Math.min(...upcomingDates.map((value) => value.getTime())))
+        : null;
+
     return {
-      id: row.id,
-      title: row.title,
-      sourceFile: row.sourceFile,
-      createdAt: toDate(row.createdAt),
-      updatedAt: toDate(row.updatedAt),
-      lastReviewAt: toOptionalDate(row.lastReviewAt),
-      oldestOverdueAt: toOptionalDate(row.oldestOverdueAt),
-      nextUpcomingDueAt: toOptionalDate(row.nextUpcomingDueAt),
-      cardCount: toNumber(row.cardCount),
+      id: deck.id,
+      title: deck.title,
+      sourceFile: deck.sourceFile,
+      createdAt: deck.createdAt,
+      updatedAt: deck.updatedAt,
+      lastReviewAt: deck.lastReviewAt,
+      oldestOverdueAt,
+      nextUpcomingDueAt,
+      cardCount: deck.cards.length,
       dueCount,
       status: getDeckStatus(dueCount),
     };
@@ -380,55 +383,6 @@ function getDeckStatus(dueCount: number): "Active" | "Steady" | "Calm" {
   return "Calm";
 }
 
-function toNumber(value: number | bigint | string): number {
-  if (typeof value === "bigint") {
-    return Number(value);
-  }
-
-  if (typeof value === "string") {
-    return Number(value);
-  }
-
-  return value;
-}
-
-function toDate(value: Date | string | number | bigint): Date {
-  if (value instanceof Date) {
-    return value;
-  }
-
-  if (typeof value === "bigint") {
-    return new Date(normalizeEpochMs(Number(value)));
-  }
-
-  if (typeof value === "number") {
-    return new Date(normalizeEpochMs(value));
-  }
-
-  const date = new Date(value);
-  if (!Number.isNaN(date.getTime())) {
-    return date;
-  }
-
-  const numeric = Number(value);
-  if (!Number.isNaN(numeric)) {
-    return new Date(normalizeEpochMs(numeric));
-  }
-
-  throw new DeckServiceError("Invalid date value returned from database.", 500);
-}
-
-function toOptionalDate(
-  value: Date | string | number | bigint | null,
-): Date | null {
-  if (value === null || value === undefined) {
-    return null;
-  }
-  if (typeof value === "string" && value.trim().length === 0) {
-    return null;
-  }
-  return toDate(value);
-}
 
 function hasEnoughExtractedText(value: string): boolean {
   const normalized = value.replace(/\s+/g, " ").trim();
@@ -444,24 +398,6 @@ function hasEnoughExtractedText(value: string): boolean {
 
   const letterCount = (normalized.match(/\p{L}/gu) ?? []).length;
   return letterCount >= 160;
-}
-
-function normalizeEpochMs(value: number): number {
-  if (!Number.isFinite(value)) {
-    return value;
-  }
-
-  const abs = Math.abs(value);
-  if (abs < 1e11) {
-    return value * 1000;
-  }
-  if (abs > 1e14 && abs <= 1e17) {
-    return Math.trunc(value / 1000);
-  }
-  if (abs > 1e17) {
-    return Math.trunc(value / 1_000_000);
-  }
-  return value;
 }
 
 function looksLikePdfBytes(bytes: Buffer): boolean {
