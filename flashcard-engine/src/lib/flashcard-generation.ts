@@ -186,7 +186,7 @@ async function tryOpenAiGeneration(input: {
       chunkIndex,
       maxCards: chunkBudgets[chunkIndex] ?? input.maxCards,
     })),
-    2,
+    1,
     async (item) =>
       tryOpenAiGenerationForChunk({
         deckTitle: input.deckTitle,
@@ -198,9 +198,11 @@ async function tryOpenAiGeneration(input: {
   );
 
   const collectedCards = results.flatMap((result) => result.cards);
-  const warnings = results
+  const warnings = summarizeWarnings(
+    results
     .map((result) => result.warning)
-    .filter((warning): warning is string => Boolean(warning));
+    .filter((warning): warning is string => Boolean(warning)),
+  );
 
   if (collectedCards.length > 0) {
     const normalizedCards = normalizeCards(collectedCards, input.maxCards);
@@ -208,7 +210,7 @@ async function tryOpenAiGeneration(input: {
       return {
         cards: normalizedCards,
         provider: "openai",
-        warning: warnings.length > 0 ? warnings.join(" ") : null,
+        warning: warnings || null,
       };
     }
 
@@ -216,7 +218,7 @@ async function tryOpenAiGeneration(input: {
       cards: [],
       provider: "openai",
       warning:
-        warnings.join(" ") ||
+        warnings ||
         "OpenAI generated content, but no card passed quality validation. Try another PDF or reduce card count.",
     };
   }
@@ -225,7 +227,7 @@ async function tryOpenAiGeneration(input: {
     cards: [],
     provider: "openai",
     warning:
-      warnings.join(" ") ||
+      warnings ||
       "OpenAI generation produced no usable cards.",
   };
 }
@@ -248,85 +250,114 @@ async function tryOpenAiGenerationForChunk(input: {
   }
 
   const timeoutMs = 22_000;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const maxAttempts = 3;
 
-  try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-      },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: env.OPENAI_MODEL,
-        temperature: 0.3,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              "You generate high-quality study flashcards. Return only valid JSON.",
-          },
-          {
-            role: "user",
-            content: buildPrompt(input),
-          },
-        ],
-      }),
-    });
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: env.OPENAI_MODEL,
+          temperature: 0.3,
+          response_format: { type: "json_object" },
+          messages: [
+            {
+              role: "system",
+              content:
+                "You generate high-quality study flashcards. Return only valid JSON.",
+            },
+            {
+              role: "user",
+              content: buildPrompt(input),
+            },
+          ],
+        }),
+      });
 
-    if (!response.ok) {
+      if (response.status === 429 && attempt < maxAttempts) {
+        const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+        await sleep(retryAfterMs ?? getBackoffMs(attempt));
+        continue;
+      }
+
+      if (response.status >= 500 && attempt < maxAttempts) {
+        await sleep(getBackoffMs(attempt));
+        continue;
+      }
+
+      if (!response.ok) {
+        return {
+          cards: [],
+          provider: "openai",
+          warning: `OpenAI request failed with status ${response.status}.`,
+        };
+      }
+
+      const payload = (await response.json()) as OpenAiChatResponse;
+      const rawContent = payload.choices?.[0]?.message?.content?.trim();
+
+      if (!rawContent) {
+        return {
+          cards: [],
+          provider: "openai",
+          warning: "OpenAI returned empty content.",
+        };
+      }
+
+      const parsed = aiResponseSchema.safeParse(parseJsonContent(rawContent));
+      if (!parsed.success) {
+        return {
+          cards: [],
+          provider: "openai",
+          warning: "OpenAI returned invalid JSON schema.",
+        };
+      }
+
+      return {
+        cards: normalizeCards(parsed.data.cards, input.maxCards),
+        provider: "openai",
+        warning: null,
+      };
+    } catch (error) {
+      if (isAbortError(error) && attempt < maxAttempts) {
+        await sleep(getBackoffMs(attempt));
+        continue;
+      }
+      if (!isAbortError(error) && attempt < maxAttempts) {
+        await sleep(getBackoffMs(attempt));
+        continue;
+      }
+
+      if (isAbortError(error)) {
+        return {
+          cards: [],
+          provider: "openai",
+          warning: `OpenAI request timed out after ${timeoutMs / 1000} seconds.`,
+        };
+      }
+
       return {
         cards: [],
         provider: "openai",
-        warning: `OpenAI request failed with status ${response.status}.`,
+        warning: "OpenAI request error.",
       };
+    } finally {
+      clearTimeout(timeoutId);
     }
-
-    const payload = (await response.json()) as OpenAiChatResponse;
-    const rawContent = payload.choices?.[0]?.message?.content?.trim();
-
-    if (!rawContent) {
-      return {
-        cards: [],
-        provider: "openai",
-        warning: "OpenAI returned empty content.",
-      };
-    }
-
-    const parsed = aiResponseSchema.safeParse(parseJsonContent(rawContent));
-    if (!parsed.success) {
-      return {
-        cards: [],
-        provider: "openai",
-        warning: "OpenAI returned invalid JSON schema.",
-      };
-    }
-
-    return {
-      cards: normalizeCards(parsed.data.cards, input.maxCards),
-      provider: "openai",
-      warning: null,
-    };
-  } catch (error) {
-    if (isAbortError(error)) {
-      return {
-        cards: [],
-        provider: "openai",
-        warning: `OpenAI request timed out after ${timeoutMs / 1000} seconds.`,
-      };
-    }
-
-    return {
-      cards: [],
-      provider: "openai",
-      warning: "OpenAI request error.",
-    };
-  } finally {
-    clearTimeout(timeoutId);
   }
+
+  return {
+    cards: [],
+    provider: "openai",
+    warning: "OpenAI request failed after multiple retries.",
+  };
 }
 
 function buildPrompt(input: {
@@ -1362,6 +1393,52 @@ function getFallbackDifficulty(difficulty: GenerationDifficulty): number {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
+}
+
+function getBackoffMs(attempt: number): number {
+  return Math.min(6_000, 700 * 2 ** (attempt - 1));
+}
+
+function parseRetryAfterMs(retryAfter: string | null): number | null {
+  if (!retryAfter) {
+    return null;
+  }
+
+  const asSeconds = Number(retryAfter);
+  if (Number.isFinite(asSeconds) && asSeconds > 0) {
+    return Math.min(20_000, asSeconds * 1000);
+  }
+
+  const asDateMs = Date.parse(retryAfter);
+  if (!Number.isNaN(asDateMs)) {
+    const delta = asDateMs - Date.now();
+    if (delta > 0) {
+      return Math.min(20_000, delta);
+    }
+  }
+
+  return null;
+}
+
+function summarizeWarnings(warnings: string[]): string | null {
+  if (warnings.length === 0) {
+    return null;
+  }
+
+  const counts = new Map<string, number>();
+  for (const warning of warnings) {
+    counts.set(warning, (counts.get(warning) ?? 0) + 1);
+  }
+
+  return Array.from(counts.entries())
+    .map(([warning, count]) => (count > 1 ? `${warning} (x${count})` : warning))
+    .join(" ");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 async function mapWithConcurrency<TInput, TOutput>(
