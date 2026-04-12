@@ -58,7 +58,7 @@ Copy-Item .env.example .env
 npm run prisma:generate
 ```
 
-4. Apply schema/migrations:
+4. Apply schema/migrations (PostgreSQL):
 
 ```bash
 npm run prisma:migrate
@@ -122,4 +122,3 @@ Before release:
 
 - `npm run lint`
 - `npm run build`
-- `npx prisma migrate deploy`

@@ -28,7 +28,7 @@ const envSchema = z.object({
   NODE_ENV: z
     .enum(["development", "test", "production"])
     .default("development"),
-  DATABASE_URL: z.string().min(1).default("file:./prisma/dev.db"),
+  DATABASE_URL: z.string().min(1),
   OPENAI_API_KEY: optionalTrimmedString(),
   OPENAI_MODEL: z.string().min(1).default("gpt-4o-mini"),
   ALLOW_EXTERNAL_LLM: z

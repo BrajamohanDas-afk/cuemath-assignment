@@ -1,2 +1,1 @@
--- DropTable
-DROP TABLE IF EXISTS "AuthCode";
+-- No-op. OTP auth table is not part of PostgreSQL baseline schema.
