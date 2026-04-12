@@ -140,7 +140,12 @@ async function tryGeminiExplanation(
       return null;
     }
 
-    const parsed = explanationSchema.safeParse(parseJsonContent(rawContent));
+    const jsonContent = parseJsonContent(rawContent);
+    let parsed = explanationSchema.safeParse(jsonContent);
+    if (!parsed.success) {
+      const coerced = coerceToExplanationSchema(jsonContent);
+      parsed = explanationSchema.safeParse(coerced);
+    }
     if (!parsed.success) {
       return null;
     }
@@ -311,6 +316,28 @@ function tokenize(value: string): Set<string> {
 
 function sanitizeText(value: string): string {
   return value.replace(/\s{2,}/g, " ").trim();
+}
+
+function coerceToExplanationSchema(raw: unknown): unknown {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const obj = raw as Record<string, unknown>;
+
+  let explanation = typeof obj.explanation === "string" ? obj.explanation.trim() : "";
+  if (explanation.length > 4000) explanation = explanation.slice(0, 3997) + "...";
+
+  let evidence: string[] = [];
+  if (Array.isArray(obj.evidence)) {
+    evidence = obj.evidence
+      .filter((e): e is string => typeof e === "string")
+      .map((e) => {
+        const trimmed = e.trim();
+        return trimmed.length > 700 ? trimmed.slice(0, 697) + "..." : trimmed;
+      })
+      .filter((e) => e.length >= 8)
+      .slice(0, 5);
+  }
+
+  return { explanation, evidence };
 }
 
 function parseJsonContent(content: string): unknown {

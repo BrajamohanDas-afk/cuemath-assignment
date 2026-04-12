@@ -426,7 +426,12 @@ async function tryGeminiGenerationForChunk(input: {
         };
       }
 
-      const parsed = aiResponseSchema.safeParse(parseJsonContentWithRepair(rawContent));
+      const jsonContent = parseJsonContentWithRepair(rawContent);
+      let parsed = aiResponseSchema.safeParse(jsonContent);
+      if (!parsed.success) {
+        const coerced = coerceToAiResponseSchema(jsonContent);
+        parsed = aiResponseSchema.safeParse(coerced);
+      }
       if (!parsed.success) {
         return {
           cards: [],
@@ -835,6 +840,49 @@ function prioritizeCoverageAndQuality(
   }
 
   return selected.slice(0, maxCards);
+}
+
+function coerceToAiResponseSchema(raw: unknown): unknown {
+  if (raw == null || typeof raw !== "object") return raw;
+
+  // Handle Gemini returning a bare array instead of { cards: [...] }
+  const obj = Array.isArray(raw) ? { cards: raw } : (raw as Record<string, unknown>);
+
+  const rawCards = Array.isArray(obj.cards) ? obj.cards : [];
+  const supportedTypes = new Set<string>(SUPPORTED_CARD_TYPES);
+
+  const cards = rawCards
+    .filter((c): c is Record<string, unknown> => c != null && typeof c === "object" && !Array.isArray(c))
+    .map((card) => {
+      let type = typeof card.type === "string" ? card.type.toUpperCase() : "CONCEPT";
+      if (!supportedTypes.has(type)) type = "CONCEPT";
+
+      let front = typeof card.front === "string" ? card.front.trim() : "";
+      if (front.length > 180) front = front.slice(0, 177) + "...";
+
+      let back = typeof card.back === "string" ? card.back.trim() : "";
+      if (back.length > 700) back = back.slice(0, 697) + "...";
+
+      let difficulty: number | undefined;
+      if (card.difficulty != null) {
+        const d = Number(card.difficulty);
+        if (Number.isFinite(d)) difficulty = Math.max(1, Math.min(5, Math.round(d)));
+      }
+
+      let tags: string[] | undefined;
+      if (Array.isArray(card.tags)) {
+        tags = card.tags
+          .filter((t): t is string => typeof t === "string")
+          .map((t) => t.trim().slice(0, 24))
+          .filter((t) => t.length > 0)
+          .slice(0, 6);
+      }
+
+      return { type, front, back, difficulty, tags };
+    })
+    .filter((card) => card.front.length >= 8 && card.back.length >= 16);
+
+  return { cards: cards.slice(0, 24) };
 }
 
 function parseJsonContentWithRepair(content: string): unknown {
