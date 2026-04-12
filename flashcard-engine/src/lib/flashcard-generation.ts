@@ -34,7 +34,7 @@ export interface GeneratedFlashcard {
 
 export interface GenerationResult {
   cards: GeneratedFlashcard[];
-  provider: "openai" | "fallback";
+  provider: "openai";
   warning: string | null;
 }
 
@@ -93,6 +93,21 @@ const QUESTION_FAMILIES: readonly QuestionFamily[] = [
   "build_design",
 ] as const;
 
+const HIGH_QUALITY_FALLBACK_TEMPLATE_IDS = new Set([
+  "foundation_what_is",
+  "foundation_define_simple",
+  "understanding_explain",
+  "output_predict",
+  "application_use_in_scenario",
+  "use_case_when_should",
+  "steps_process",
+  "rules_constraints",
+  "pros_cons",
+  "cause_effect",
+  "fill_missing",
+  "memory_hook",
+]);
+
 type DefinitionPair = {
   term: string;
   definition: string;
@@ -150,15 +165,7 @@ export async function generateFlashcardsFromText(
     difficulty,
   });
 
-  if (aiAttempt.cards.length > 0) {
-    return aiAttempt;
-  }
-
-  return {
-    cards: buildFallbackCards(sourceText, maxCards, difficulty),
-    provider: "fallback",
-    warning: aiAttempt.warning,
-  };
+  return aiAttempt;
 }
 
 async function tryOpenAiGeneration(input: {
@@ -167,7 +174,8 @@ async function tryOpenAiGeneration(input: {
   maxCards: number;
   difficulty: GenerationDifficulty;
 }): Promise<GenerationResult> {
-  const sourceChunks = splitSourceIntoChunks(input.sourceText, {
+  const modelReadySource = buildModelReadySource(input.sourceText);
+  const sourceChunks = splitSourceIntoChunks(modelReadySource, {
     maxChars: 5_500,
     maxChunks: 3,
   });
@@ -195,10 +203,21 @@ async function tryOpenAiGeneration(input: {
     .filter((warning): warning is string => Boolean(warning));
 
   if (collectedCards.length > 0) {
+    const normalizedCards = normalizeCards(collectedCards, input.maxCards);
+    if (normalizedCards.length > 0) {
+      return {
+        cards: normalizedCards,
+        provider: "openai",
+        warning: warnings.length > 0 ? warnings.join(" ") : null,
+      };
+    }
+
     return {
-      cards: normalizeCards(collectedCards, input.maxCards),
+      cards: [],
       provider: "openai",
-      warning: warnings.length > 0 ? warnings.join(" ") : null,
+      warning:
+        warnings.join(" ") ||
+        "OpenAI generated content, but no card passed quality validation. Try another PDF or reduce card count.",
     };
   }
 
@@ -207,7 +226,7 @@ async function tryOpenAiGeneration(input: {
     provider: "openai",
     warning:
       warnings.join(" ") ||
-      "OpenAI generation produced no usable cards. Used local fallback generation.",
+      "OpenAI generation produced no usable cards.",
   };
 }
 
@@ -224,11 +243,11 @@ async function tryOpenAiGenerationForChunk(input: {
       cards: [],
       provider: "openai",
       warning:
-        "External LLM is disabled or OPENAI_API_KEY is not set. Used local fallback generation.",
+        "OpenAI is required for card generation but is not configured (missing OPENAI_API_KEY or ALLOW_EXTERNAL_LLM=false).",
     };
   }
 
-  const timeoutMs = 15_000;
+  const timeoutMs = 22_000;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -262,7 +281,7 @@ async function tryOpenAiGenerationForChunk(input: {
       return {
         cards: [],
         provider: "openai",
-        warning: `OpenAI request failed with status ${response.status}. Used local fallback generation.`,
+        warning: `OpenAI request failed with status ${response.status}.`,
       };
     }
 
@@ -273,7 +292,7 @@ async function tryOpenAiGenerationForChunk(input: {
       return {
         cards: [],
         provider: "openai",
-        warning: "OpenAI returned empty content. Used local fallback generation.",
+        warning: "OpenAI returned empty content.",
       };
     }
 
@@ -282,8 +301,7 @@ async function tryOpenAiGenerationForChunk(input: {
       return {
         cards: [],
         provider: "openai",
-        warning:
-          "OpenAI returned invalid JSON schema. Used local fallback generation.",
+        warning: "OpenAI returned invalid JSON schema.",
       };
     }
 
@@ -297,14 +315,14 @@ async function tryOpenAiGenerationForChunk(input: {
       return {
         cards: [],
         provider: "openai",
-        warning: `OpenAI request timed out after ${timeoutMs / 1000} seconds. Used local fallback generation.`,
+        warning: `OpenAI request timed out after ${timeoutMs / 1000} seconds.`,
       };
     }
 
     return {
       cards: [],
       provider: "openai",
-      warning: "OpenAI request error. Used local fallback generation.",
+      warning: "OpenAI request error.",
     };
   } finally {
     clearTimeout(timeoutId);
@@ -366,6 +384,9 @@ function buildFallbackCards(
 
   return normalizeCards(cards, maxCards);
 }
+
+const fallbackCardBuilderRetainedForFutureUse = buildFallbackCards;
+void fallbackCardBuilderRetainedForFutureUse;
 
 function buildFallbackCardsForChunk(
   sourceText: string,
@@ -430,7 +451,13 @@ function normalizeCards(
     if (front.length < 8 || back.length < minBackLength) {
       continue;
     }
+    if (isLowQualityFront(front)) {
+      continue;
+    }
     if (isIncompleteAnswer(back)) {
+      continue;
+    }
+    if (isLikelyListDump(back)) {
       continue;
     }
 
@@ -446,7 +473,7 @@ function normalizeCards(
     seen.add(dedupeKey);
 
     const qualityScore = estimateCardQuality(front, back, card.type);
-    if (qualityScore < 45) {
+    if (qualityScore < 55) {
       continue;
     }
 
@@ -626,6 +653,18 @@ function normalizeBackText(value: string): string {
     }
   }
 
+  if (isLikelyListDump(cleaned)) {
+    const firstSentence = cleaned.split(/(?<=[.!?])\s+/)[0]?.trim();
+    if (firstSentence && firstSentence.length >= 20) {
+      cleaned = firstSentence;
+    } else {
+      const compactClause = cleaned.split(/[;,:]/)[0]?.trim();
+      if (compactClause && compactClause.length >= 20) {
+        cleaned = compactClause;
+      }
+    }
+  }
+
   return trimForCard(cleaned, 320);
 }
 
@@ -633,6 +672,27 @@ function hasExcessiveNumericNoise(value: string): boolean {
   const numberTokens = value.match(/\b\d+(?:\.\d+)?\b/g) ?? [];
   const commaCount = (value.match(/,/g) ?? []).length;
   return numberTokens.length >= 8 || (numberTokens.length >= 5 && commaCount >= 6);
+}
+
+function isLikelyListDump(value: string): boolean {
+  const words = value.trim().split(/\s+/).filter(Boolean).length;
+  const commaCount = (value.match(/,/g) ?? []).length;
+  const semicolonCount = (value.match(/;/g) ?? []).length;
+  const colonCount = (value.match(/:/g) ?? []).length;
+  const hasManyDelimiters = commaCount + semicolonCount + colonCount >= 7;
+  const hasEnumerationPattern =
+    /(?:\bexample\b|\bcase\b|\bdesign\b|\btesting\b|\bmean\b|\bmedian\b|\bmode\b)/i.test(
+      value,
+    ) && commaCount >= 4;
+  return (words >= 48 && hasManyDelimiters) || (words >= 42 && hasEnumerationPattern);
+}
+
+function buildModelReadySource(sourceText: string): string {
+  const candidates = collectFallbackCandidates(sourceText).slice(0, 120);
+  if (candidates.length >= 12) {
+    return candidates.join("\n");
+  }
+  return reflowWrappedLines(sourceText);
 }
 
 function collectFallbackCandidates(sourceText: string): string[] {
@@ -905,7 +965,9 @@ function buildQuestionContext(
 ): QuestionContext {
   const keywords = extractKeywords(sentence, 4);
   const primaryTerm = definitionPair?.term ?? keywords[0] ?? "this concept";
-  const secondaryTerm = keywords.find((token) => token !== primaryTerm) ?? null;
+  const secondaryTerm = keywords.find(
+    (token) => token !== primaryTerm && !areTermsTooSimilar(primaryTerm, token),
+  ) ?? null;
   const acronym = extractAcronym(sentence);
   const codeHint = extractCodeHint(sentence);
   const answerText = definitionPair?.definition ?? sentence;
@@ -923,6 +985,9 @@ function buildQuestionContext(
 
 function getApplicableTemplates(ctx: QuestionContext): QuestionTemplate[] {
   return QUESTION_TEMPLATES.filter((template) => {
+    if (!HIGH_QUALITY_FALLBACK_TEMPLATE_IDS.has(template.id)) {
+      return false;
+    }
     if (template.requiresSecondary && !ctx.secondaryTerm) {
       return false;
     }
@@ -935,6 +1000,54 @@ function getApplicableTemplates(ctx: QuestionContext): QuestionTemplate[] {
 
 function q(term: string): string {
   return `"${sanitizeCardText(term)}"`;
+}
+
+function isLowQualityFront(value: string): boolean {
+  const normalized = sanitizeCardText(value);
+  if (!normalized) {
+    return true;
+  }
+
+  const comparisonMatch = normalized.match(
+    /^difference between ["']?(.+?)["']? and ["']?(.+?)["']?[.?]?$/i,
+  );
+  if (comparisonMatch) {
+    const first = comparisonMatch[1] ?? "";
+    const second = comparisonMatch[2] ?? "";
+    if (areTermsTooSimilar(first, second)) {
+      return true;
+    }
+  }
+
+  if (/^identify the concept from this description:/i.test(normalized)) {
+    return true;
+  }
+
+  return false;
+}
+
+function areTermsTooSimilar(left: string, right: string): boolean {
+  const normalize = (value: string) =>
+    sanitizeCardText(value)
+      .toLowerCase()
+      .replace(/[^a-z0-9 ]/g, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+
+  const a = normalize(left);
+  const b = normalize(right);
+  if (!a || !b) {
+    return true;
+  }
+  if (a === b) {
+    return true;
+  }
+  const shorter = a.length <= b.length ? a : b;
+  const longer = a.length > b.length ? a : b;
+  if (shorter.length >= 4 && longer.includes(shorter)) {
+    return true;
+  }
+  return false;
 }
 
 const QUESTION_TEMPLATES: QuestionTemplate[] = [
