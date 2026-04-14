@@ -249,10 +249,19 @@ export async function submitReviewRating(
       throw new ReviewServiceError("Deck not found for selected user.", 404);
     }
 
-    await updateSessionStats(tx, ensuredSessionId, input.rating, input.responseTimeMs);
-
     return ensuredSessionId;
-  });
+  }, { timeout: 15_000, maxWait: 10_000 });
+
+  // Keep core review persistence atomic, but update session aggregates outside
+  // the interactive transaction to avoid timeout pressure on slower DBs.
+  try {
+    await updateSessionStats(sessionId, input.rating, input.responseTimeMs);
+  } catch (error) {
+    console.error("Failed to update review session stats", {
+      sessionId,
+      error,
+    });
+  }
 
   const queue = await getReviewQueue(input.deckId, userId);
   return {
@@ -357,12 +366,11 @@ async function ensureSession(
 }
 
 async function updateSessionStats(
-  tx: Prisma.TransactionClient,
   sessionId: string,
   rating: ReviewRating,
   responseTimeMs?: number,
 ) {
-  const current = await tx.session.findUnique({
+  const current = await prisma.session.findUnique({
     where: { id: sessionId },
     select: { reviewed: true, correct: true, avgTimeMs: true },
   });
@@ -379,7 +387,7 @@ async function updateSessionStats(
     responseTimeMs,
   );
 
-  await tx.session.update({
+  await prisma.session.update({
     where: { id: sessionId },
     data: {
       reviewed,

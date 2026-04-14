@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { IBM_Plex_Mono, Space_Grotesk } from "next/font/google";
 import Link from "next/link";
+import { resolveServerUserId } from "@/lib/auth-user";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -31,11 +32,16 @@ const navItems = [
   { href: "/progress", label: "Progress" },
 ];
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const userId = await resolveServerUserId();
+  const visibleNavItems = userId
+    ? navItems.filter((item) => item.href !== "/login")
+    : navItems;
+
   return (
     <html
       lang="en"
@@ -54,7 +60,7 @@ export default function RootLayout({
                 </h1>
               </div>
               <nav className="flex flex-wrap items-center gap-2">
-                {navItems.map((item) => (
+                {visibleNavItems.map((item) => (
                   <Link
                     key={item.href}
                     href={item.href}

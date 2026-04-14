@@ -34,10 +34,10 @@ export default function UploadPage() {
   const [deckTitle, setDeckTitle] = useState("");
   const [cardCountPreset, setCardCountPreset] = useState<
     "few" | "standard" | "more"
-  >("standard");
+  >("few");
   const [difficultyPreset, setDifficultyPreset] = useState<
     "easy" | "medium" | "hard"
-  >("medium");
+  >("easy");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [result, setResult] = useState<DeckResult | null>(null);
@@ -254,8 +254,6 @@ export default function UploadPage() {
           <ul className="mt-4 space-y-3 text-sm text-[var(--ink-dim)]">
             <li>PDF only, one file per deck</li>
             <li>Max upload size: 10 MB</li>
-            <li>Cards are saved to DB immediately after generation</li>
-            <li>Gemini key is required for card generation</li>
           </ul>
         </aside>
       </div>

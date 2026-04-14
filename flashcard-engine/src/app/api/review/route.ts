@@ -107,6 +107,8 @@ export async function POST(request: NextRequest) {
     const ratingResult = await submitReviewRating(ratingInput, userId);
     return NextResponse.json(ratingResult);
   } catch (error) {
+    console.error("POST /api/review failed", error);
+
     if (error instanceof ReviewServiceError) {
       return NextResponse.json(
         { message: error.message },
